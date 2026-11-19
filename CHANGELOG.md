@@ -2,6 +2,15 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.13
+### Added
+- Light mode for low-memory laptops: under 12 GB of RAM the app makes 1 Short at a time, renders at 30 fps, uses the first hour of very long streams, deletes the downloaded audio after the transcript and checks free disk space before it starts.
+### Changed
+- Make, Schedule, Brand, Auto-post and Settings now follow the app language in all 8 languages.
+### Testing
+- Light mode on the same video and picks: peak memory 5.84 GB -> 1.85 GB, about 25% slower, both Shorts passed the quality check.
+- All 8 languages walked in the browser with no untranslated labels and no errors.
+
 ## 1.0.12
 ### Changed
 - Sharper video: the stretched 9:16 crops are scaled with a sharper method and lightly sharpened, the in-between steps no longer lose detail, and the final file keeps more of it.

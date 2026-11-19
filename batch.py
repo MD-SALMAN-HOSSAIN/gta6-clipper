@@ -4,6 +4,7 @@
 #                "title": "...", "hashtags": "#gta6 ...", "credit": "Kai Cenat", "style": "hormozi", "layout": "bubble"}, ...]
 #   "format": moment (default) | callback | compilation | escalation | thenvsnow | reveal | chat | waitforit: see formats.py for each one's fields   (title/hashtags/credit/style/layout optional)
 import json, os, re, subprocess, sys, threading, time
+import lite
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")  # hooks can carry emoji; a cp1252 pipe would crash the print
@@ -67,6 +68,7 @@ def validate(picks):
     return good
 
 def main(picks_file, out_dir):
+    lite.disk_ok(out_dir if Path(out_dir).exists() else "."); lite.light() and print(lite.note(), flush=True)
     import shutil
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")): raise SystemExit("ffmpeg not found on PATH. Install: Windows `winget install Gyan.FFmpeg` | macOS `brew install ffmpeg` | Linux `sudo apt install ffmpeg` (then open a new terminal).")
     picks, out = validate(json.load(open(picks_file, encoding="utf-8"))), Path(out_dir); out.mkdir(parents=True, exist_ok=True)
@@ -126,7 +128,7 @@ def main(picks_file, out_dir):
             # cover: the frame 1 s in (hook on screen, face in frame), for the Shorts / Reels cover picker
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(mp4), "-frames:v", "1", "-q:v", "2", str(out / f"{mp4.stem}_cover.jpg")])
         except Exception as e: print("  failed, skipped:", e, flush=True)
-    workers = int(os.environ.get("CLIPPER_WORKERS", 3))  # 3 Shorts at once: downloads and encodes overlap (24-core test PC: see LOG); set 1 on a weak PC
+    workers = int(os.environ.get("CLIPPER_WORKERS", 1 if lite.light() else 3))  # Light mode (little RAM): one at a time  # 3 Shorts at once: downloads and encodes overlap (24-core test PC: see LOG); set 1 on a weak PC
     with ThreadPoolExecutor(workers) as ex: list(ex.map(lambda a: one(*a), enumerate(picks, 1)))
     done.sort()
     # overview: 4 frames per Short (the last one 0.5 s before the end, so a logo card at the end shows), one row each, so a glance shows framing, captions and hook for all of them

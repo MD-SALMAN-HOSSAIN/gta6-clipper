@@ -4,6 +4,7 @@
 #        channels.txt line 'twitch: Grand Theft Auto VI' does the same inside the normal run (3 VODs per line).
 # Usage: python watch.py [TITLE_REGEX='GTA ?(6|VI)'] [MAX_NEW=3]      (run it on a schedule, or let the skill run it)
 #        python watch.py <link or file>   one video from any site yt-dlp knows (YouTube, Twitch VODs, Kick) or a local file
+import lite
 import json, os, re, subprocess, sys, threading, urllib.parse, urllib.request
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)  # titles carry emoji (Windows console is cp1252); each line shows at once, also in a log file
 from pathlib import Path
@@ -117,7 +118,7 @@ if link:  # one pasted link or file: ask yt-dlp for its id and title (works for 
     j = {} if Path(link).is_file() else json.loads(run_t([PY, "-m", "yt_dlp", *CK, "-J", "--no-warnings", link], T_META, "video info", capture_output=True, text=True, encoding="utf-8").stdout or "{}")
     new = [dict(id=re.sub(r"\W", "_", j.get("id") or Path(link).stem), title=j.get("title") or Path(link).stem, date=(j.get("upload_date") or "")[:8],
                 channel=j.get("uploader") or j.get("channel") or "", views=j.get("view_count") or 0, url=link)]; max_new = 1
-    win = sys.argv[2] if len(sys.argv) > 2 else ("0-3:00:00" if (j.get("duration") or 0) > 4 * 3600 else None)  # a 40-hour VOD would take an hour to fetch
+    win = sys.argv[2] if len(sys.argv) > 2 else (("0-1:00:00" if (j.get("duration") or 0) > 1.5 * 3600 else None) if lite.light() else ("0-3:00:00" if (j.get("duration") or 0) > 4 * 3600 else None))  # a 40-hour VOD would take an hour to fetch
     if win: new[0]["id"] += "_" + re.sub(r"\W", "", win); print("  window", win, "of", f"{(j.get('duration') or 0) / 3600:.1f} h")
 else: win = None
 sec = lambda t: sum(float(x) * 60 ** i for i, x in enumerate(reversed(t.split(":"))))
@@ -167,6 +168,7 @@ for v in new:
                 print("  chat:", len(chat.get("t") or {}), "spikes; clips:", len(chat.get("c") or []), "; replay graph:", "yes" if hm else "none")
             except Exception as e: print("  tags skipped:", str(e)[:100])
         (SRC / f"{v['id']}.meta.json").write_text(json.dumps(v | dict(url=url), ensure_ascii=False), encoding="utf-8"); done_n += 1
+        if lite.light() and a.parent == SRC and a.exists(): a.unlink()  # Light mode: the audio is not needed once transcribed (clips fetch their own video)
     else: print("  skipped: under 3 min (a Short) or over 2 h")
     seen.add(v["id"]); SEEN.write_text(json.dumps(sorted(seen)))  # only after the transcript exists, so a crash retries
 print(len(new), "new matching uploads,", done_n, "transcribed -> clips/src/*.txt")

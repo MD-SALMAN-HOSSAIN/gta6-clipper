@@ -7,6 +7,7 @@ import numpy as np, cv2
 sys.stdout.reconfigure(encoding="utf-8")  # hooks and paths can carry emoji; a cp1252 pipe would crash the print
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reframe
+import lite
 CK = ["--cookies-from-browser", os.environ["CLIPPER_BROWSER"]] if os.environ.get("CLIPPER_BROWSER") else []  # set CLIPPER_BROWSER=firefox (or edge, chrome) for videos that need a YouTube login
 
 FONT = "Montserrat ExtraBold"
@@ -550,7 +551,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
         else: raise SystemExit("audio keeps coming back short; try this Short again later")
         src, seek = str(part), 0
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{seek:.3f}", "-to", f"{seek + end - start:.3f}", "-i", src,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-c:a", "aac", "-b:a", "192k", str(seg)], check=True, timeout=300 + 20 * (end - start))
+                    *(["-r", "30"] if lite.light() else []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-c:a", "aac", "-b:a", "192k", str(seg)], check=True, timeout=300 + 20 * (end - start))
     reframe.crop_bars(seg)  # black bars baked into the stream frame (trailer/cutscene letterbox) would show as strips or a small picture
     global CAP_Y, HOOK_Y, STACKED, KEY
     flip = truthy(opt("flip", opts, brand, "")); reframe.FLIP = flip
