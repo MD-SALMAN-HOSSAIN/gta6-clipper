@@ -2,6 +2,18 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.11
+### Added
+- What's new: Settings > Updates now lists every version with what changed and how it was tested, and shows what an update brings before you install it. After each update, a short "What's new" window appears once.
+### Fixed
+- Live hunt on Kick no longer stops after a few minutes. When a stream goes silent without closing, the recorder restarts it within 30 seconds.
+- A face shown on an in-game TV or a video inside the stream now fills the Short, without the dark room above it.
+- The Short screen (versions, Ask the AI, Look, post text, schedule) now follows the app language in all 8 languages.
+### Testing
+- Kick: a live channel recorded 11 minutes without a gap; a stream that goes silent was restarted every time.
+- In-game TV Short: the dark band went from 5.6 s to none on the face shots.
+- All 8 languages checked in the browser with no errors.
+
 ## 1.0.10
 ### Fixed
 - "End 2 s earlier" and other trims in "Ask the AI to change it" now work. The renderer used to move the end back to the previous full sentence (sometimes 13 s earlier), so the AI refused. A trim you ask for now keeps your end, on the last whole word, and is never lengthened again.

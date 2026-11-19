@@ -153,11 +153,21 @@ def chat(chan, on_msg):
                     elif m := re.match(r":(\w+)!\S+ PRIVMSG #\S+ :(.*)", l): on_msg(time.time(), m[1], m[2])
         except OSError as e: print("chat reconnect:", e, flush=True); time.sleep(3)
 
-def record(url, seg):  # shortcut: no stall watchdog, DST-ambiguous local names, children can outlive a crash; fine for an evening session, harden for 24/7
-    while True:  # restart if the stream hiccups; segment names carry the wall-clock start, so restarts are harmless
-        sl = subprocess.Popen([sys.executable, "-m", "streamlink", "--stdout", "--twitch-disable-ads", url, "720p60,720p,best"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "-", "-c", "copy", "-f", "segment", "-segment_time", "4", "-strftime", "1", "-reset_timestamps", "1", str(seg / "s_%Y%m%d_%H%M%S.ts")], stdin=sl.stdout)
-        sl.kill(); time.sleep(5)
+STALL = 30  # seconds without a new segment = the stream went silent without closing (Kick did this after ~4 min, 19 Nov): restart it
+def record(url, seg):  # shortcut: DST-ambiguous local names, children can outlive a crash; fine for an evening session, harden for 24/7
+    while True:  # restart if the stream hiccups or stalls; segment names carry the wall-clock start, so restarts are harmless
+        err = open(seg.parent / "streamlink.log", "a", encoding="utf-8")  # why it stopped, instead of nothing
+        sl = subprocess.Popen([sys.executable, "-m", "streamlink", "--stdout", "--twitch-disable-ads", url, "720p60,720p,best"], stdout=subprocess.PIPE, stderr=err)
+        ff = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", "-", "-c", "copy", "-f", "segment", "-segment_time", "4", "-strftime", "1", "-reset_timestamps", "1", str(seg / "s_%Y%m%d_%H%M%S.ts")], stdin=sl.stdout)
+        t0 = time.time()
+        while ff.poll() is None:
+            time.sleep(5); new = max((p.stat().st_mtime for p in seg.glob("s_*.ts")), default=0)
+            if time.time() - max(new, t0) > STALL:
+                print(f"stream stalled {STALL} s: restarting the recorder", flush=True); err.write(time.strftime("%H:%M:%S") + " stall: restart" + chr(10)); break
+        for p in (ff, sl):
+            try: p.kill()
+            except OSError: pass
+        err.close(); time.sleep(3)
 
 def segs(seg): return sorted((dt.datetime.strptime(p.stem[2:], "%Y%m%d_%H%M%S").timestamp(), p) for p in seg.glob("s_*.ts"))
 

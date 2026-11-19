@@ -246,6 +246,20 @@ def crop916(f, x, win=None):
     H, W = f.shape[:2]; y0, ch, xo = win or (int(H * TOP_CUT), H - int(H * TOP_CUT), 0); cw = int(ch * 9 / 16)
     x0 = int(np.clip(round(x - cw / 2 + xo), 0, W - cw)); return cv2.resize(f[y0:y0 + ch, x0:x0 + cw], (OW, OH), interpolation=cv2.INTER_CUBIC)
 
+def screen_rows(f, x, fy, minh=0.45):
+    """(top, bottom) rows of a screen-in-screen (an in-game TV, a video on a wall) around the face at column x / row fy, or None.
+    A full-face crop of a TV in a dark room showed the room as a dark band over the face (QC 'black strip', 19 Nov): crop inside the screen instead.
+    Top/bottom = nearest row above/below the face where a sharp step runs across most of the 9:16 band (below: and the picture turns dark)."""
+    H, W = f.shape[:2]; cw = int(H * 9 / 16); x0 = int(np.clip(x - cw / 2, 0, W - cw))
+    g = cv2.GaussianBlur(cv2.cvtColor(f[:, x0:x0 + cw], cv2.COLOR_BGR2GRAY), (5, 5), 0).astype(np.float32)
+    step = (np.abs(g[2:] - g[:-2]) > 10).mean(axis=1); mean = g.mean(axis=1); fy = int(fy); gap = int(0.08 * H)
+    up = [r + 1 for r in range(0, max(fy - gap, 0)) if step[r] > 0.7]
+    dn = [r + 1 for r in range(min(fy + gap, H - 3), H - 2) if step[r] > 0.35 and mean[min(r + 12, H - 1)] < 0.4 * mean[max(r - 12, 0)]]
+    if not up: return None
+    t = max(up) + 2; b = min(dn) - 1 if dn else H
+    if mean[:max(t - 4, 1)].mean() > 0.6 * mean[t:b].mean(): return None  # above the edge is as bright as the picture: a shelf line, not a screen top
+    return (t, b) if b - t >= minh * H and t > 0.04 * H else None
+
 def trim916(boxes, xs, W, H):
     """fit() for crop916 around subject columns xs (the crop pans over them: the tightest answer of the min/median/max column wins). Top strip stays cut. -> (y0, height, xoff)."""
     y0 = int(H * TOP_CUT); cw = int((H - y0) * 9 / 16); best = (y0, H - y0, 0)
@@ -525,7 +539,11 @@ if __name__ == "__main__":
     if _kai.exists(): import reframe as _r; assert _r.find_facecam(_kai) is None  # that real tiny-cam clip must never produce a stack panel
     import reframe as _m; g0, g1 = _m.stack_geom(False), _m.stack_geom(True); assert g0["cam"][0] == 0 and g1["game"][0] == 0 and g1["cam"] == (_m.OH - _m.TOP_H, _m.TOP_H) and g1["seam"] == g1["cam"][0] == g1["game"][1], (g0, g1)  # flip: game on top, cam below, same sizes
     assert g1["game"][1] + g1["cam"][1] == _m.OH
-    if sys.argv[1:] == ["selftest"]: print("selftest ok"); raise SystemExit
+    if sys.argv[1:] == ["selftest"]:
+        tv = np.full((1080, 1920, 3), 18, np.uint8); tv[250:980, 700:1820] = np.random.default_rng(1).integers(60, 160, (730, 1120, 3), dtype=np.uint8)
+        r = screen_rows(tv, 1260, 570); assert r and abs(r[0] - 252) <= 4 and abs(r[1] - 980) <= 4, r  # TV in a dark room: crop stays inside it
+        assert screen_rows(np.random.default_rng(2).integers(40, 200, (1080, 1920, 3), dtype=np.uint8), 960, 540) is None  # plain full-face shot: unchanged
+        print("selftest ok"); raise SystemExit
     if len(sys.argv) < 3: print("usage: reframe.py <src.mp4> <dst.mp4> | reframe.py selftest"); raise SystemExit(2)
     src, dst = sys.argv[1], sys.argv[2]
     info, xs, mode = plan(src)
@@ -678,7 +696,7 @@ def render_stack(src, dst, cam, layout="stack"):
     # stream overlays inside the game panel (chat column, counters, cam frame, fine print): slide / shrink the window (<= 22 %) off them
     rg = reaction(src); rg = rg[0] if rg and layout != "bubble" else None  # group reaction: the game window is the game panel, shown whole
     if not rg: gx, gy0, bw, gh = fit(clutter(src, [k for k, v in enumerate(full) if v is None]), (gx, gy0, bw, gy1 - gy0), W, H, (gx, W) if left else (0, gx + bw), (0, H)); gy1 = gy0 + gh
-    wins = {}  # full-screen face runs: same trim per run (key = its x centre)
+    wins, tries = {}, {}  # full-screen face runs: same trim per run (key = its x centre); tries = screen-in-screen checks left
     fb = clutter(src, [k for k, v in enumerate(full) if isinstance(v, float)])
     tmp = Path(dst).with_suffix(".noaudio.mp4")
     ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{OW}x{OH}", "-r", str(fps),
@@ -693,7 +711,13 @@ def render_stack(src, dst, cam, layout="stack"):
         v = full[i] if i < N else None
         if v == "fill": frame = fill(f, W, H, cw)  # cam gone (edited upload): whole frame, never an empty panel
         elif v is not None:  # full-screen face: plain 9:16 crop on it
-            if v not in wins: wins[v] = trim916(fb, [v], W, H)
+            if v not in wins: wins[v] = trim916(fb, [v], W, H); tries[v] = 0
+            if tries.get(v, 9) < 4 and i % 12 == 0:  # look for a screen-in-screen on a few frames of the run (its first frame can be a transition)
+                tries[v] += 1
+                _, fs = cv2.FaceDetectorYN.create("onnx", YUNET, np.empty(0, np.uint8), (W, H), 0.6).detect(f)  # once per run
+                near = min(fs[:, :4].tolist(), key=lambda b: abs(b[0] + b[2] / 2 - v)) if fs is not None else None
+                sr = screen_rows(f, v, near[1] + near[3] / 2) if near else None
+                if sr: wins[v] = (sr[0], sr[1] - sr[0], 0); tries[v] = 9; print(f"  full-face crop kept inside an on-screen video: rows {sr[0]}-{sr[1]}")
             frame = crop916(f, v, wins[v])
         elif layout == "bubble":
             out[:] = cv2.resize(f[gy0:gy1, fx:fx + fw], (OW, OH), interpolation=cv2.INTER_CUBIC)

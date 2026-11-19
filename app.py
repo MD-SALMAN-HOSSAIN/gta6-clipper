@@ -749,6 +749,22 @@ def edit_streamers(d):
     else: raise ValueError("send add:true or remove:true")
     f.write_text(json.dumps(a, indent=1, ensure_ascii=False), encoding="utf-8"); return a[lang]
 UPD = {"t": 0, "r": None}
+CHG = {"t": 0, "r": None}
+CHANGELOG_URL = "https://guide.nocodehack.io/gta6-clipper/CHANGELOG.md"
+def parse_changelog(md):  # "## 1.0.10" / "### Fixed" / "- item" -> [{v, sections: [{h, items}]}], newest first
+    out = []
+    for line in md.splitlines():
+        if m := re.match(r"^##\s+v?(\d+\.\d+\.\d+)", line): out.append(dict(v=m[1], sections=[]))
+        elif out and (m := re.match(r"^###\s+(.+)", line)): out[-1]["sections"].append(dict(h=m[1].strip(), items=[]))
+        elif out and out[-1]["sections"] and (m := re.match(r"^\s*[-*]\s+(.+)", line)): out[-1]["sections"][-1]["items"].append(re.sub(r"\*\*|`", "", m[1]).strip())
+    return out
+def changelog():  # what's new, shown in Settings > Updates and once after an update; site first (newest notes before updating), shipped copy offline
+    if CHG["r"] and time.time() - CHG["t"] < 5 * 3600: return CHG["r"]
+    md, src = "", "site"
+    try: md = urllib.request.urlopen(urllib.request.Request(CHANGELOG_URL, headers={"User-Agent": "gta6-clipper"}), timeout=8).read().decode("utf-8", "replace")
+    except (OSError, ValueError): pass
+    if "## " not in md: md, src = ((HERE / "CHANGELOG.md").read_text(encoding="utf-8") if (HERE / "CHANGELOG.md").exists() else ""), "local"
+    r = dict(current=update.current(), source=src, versions=parse_changelog(md)[:12]); CHG.update(t=time.time(), r=r); return r
 def update_check(force=False):
     if force or not UPD["r"] or time.time() - UPD["t"] > 5 * 3600:
         UPD["r"] = update.check(); UPD["t"] = time.time(); UPD["r"].pop("manifest", None)
@@ -759,8 +775,19 @@ def proposal(d):
     contact = str(d.get("contact") or "").strip()[:200]
     with open(WS / "proposals.jsonl", "a", encoding="utf-8") as fh: fh.write(json.dumps(dict(at=datetime.datetime.now().isoformat(timespec="seconds"), text=txt, contact=contact, version=update.current()), ensure_ascii=False) + "\n")
     body = txt + (f"\n\nContact: {contact}" if contact else "") + f"\n\n(clipper {update.current()})"
-    url = "https://gitlab.com/nocodehack.io/gta6-clipper/-/issues/new?" + urllib.parse.urlencode(dict(title=txt.splitlines()[0][:80], body=body), quote_via=urllib.parse.quote)
-    return dict(ok=True, issue_url=url, note="We read every idea; updates ship every 5 hours.")
+    url = "https://gitlab.com/nocodehack.io/gta6-clipper/-/issues/new?" + urllib.parse.urlencode({"issue[title]": txt.splitlines()[0][:80], "issue[description]": body}, quote_via=urllib.parse.quote)  # GitLab's prefill names
+    sent, err = False, ""
+    try:  # the creator's site emails it to him (spam limits live there); viewers used to get "saved on this PC" and nothing arrived
+        ts, n = int(time.time()), 0  # proof of work the site checks (sha256 of ts|text|nonce starts 00000): ~1 s here, costly for a spammer
+        while not __import__("hashlib").sha256(f"{ts}|{txt}|{n}".encode()).hexdigest().startswith("00000"): n += 1
+        req = urllib.request.Request(FEEDBACK_URL, json.dumps(dict(text=txt, contact=contact, app="gta6-clipper", version=update.current(), ts=ts, nonce=str(n))).encode(), {"Content-Type": "application/json", "User-Agent": f"gta6-clipper/{update.current()}"})
+        r = json.loads(urllib.request.urlopen(req, timeout=15).read() or b"{}"); sent = bool(r.get("ok"))
+    except urllib.error.HTTPError as e:
+        try: err = json.loads(e.read() or b"{}").get("error", "")
+        except ValueError: err = f"HTTP {e.code}"
+    except (OSError, ValueError) as e: err = "no connection"
+    return dict(ok=True, sent=sent, error=err, issue_url=url, note="We read every idea; updates ship every 5 hours.")
+FEEDBACK_URL = os.environ.get("CLIPPER_FEEDBACK_URL", "https://guide.nocodehack.io/feedback.php")  # selftests point this at a local server, never the inbox
 def published():
     rows = []
     f = WS / "blotato_sent.jsonl"
@@ -796,6 +823,7 @@ def api56(method, path, q, d):  # -> (code, json) or None when the route is not 
         return (403, {"error": e, "clip": "no"}) if e else (200, hunt.start(WS, d.get("platform"), d.get("handle")))
     if path == "/api/hunt/stop": return 200, hunt.stop(d.get("platform"), d.get("handle"))
     if path == "/api/update/check" and method == "GET": return 200, update_check(q.get("force") == "1")
+    if path == "/api/changelog" and method == "GET": return 200, changelog()
     if path == "/api/update/apply": r = update.apply(WS, dry=bool(d.get("dry"))); UPD["r"] = None; return 200, r
     if path == "/api/proposals" and method == "POST": return 200, proposal(d)
     if path == "/api/published" and method == "GET": return 200, published()
