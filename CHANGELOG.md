@@ -2,6 +2,12 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.10
+### Fixed
+- "End 2 s earlier" and other trims in "Ask the AI to change it" now work. The renderer used to move the end back to the previous full sentence (sometimes 13 s earlier), so the AI refused. A trim you ask for now keeps your end, on the last whole word, and is never lengthened again.
+### Testing
+- "End 2 s earlier" clicked in the app on a real Short: new version in 3 minutes, ends 3.1 s earlier on a whole word, quality check passed.
+
 ## 1.0.9
 ### Fixed
 - Shorts that came out too quiet now get their sound brought to the normal level (-14 LUFS) at the end of the render, so they pass the quality check.

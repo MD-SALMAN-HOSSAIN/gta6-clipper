@@ -66,12 +66,17 @@ def clean(w):
     w = re.sub(r'[,.;:"]+|^-+', "", w)  # Whisper punctuation reads as noise on screen; ? and ! stay
     return w[0] + "*" * (len(w) - 1) if BAD.match(w) else w
 
-def snap(words, start, end):
-    """Start on the first spoken word, end on the next sentence end (at most 4 s later) plus a short breath: never stop mid-thought."""
+def snap(words, start, end, exact=False):
+    """Start on the first spoken word, end on the next sentence end (at most 4 s later) plus a short breath: never stop mid-thought.
+    exact=True (pick "exact_end", the user asked "end 2 s earlier"): end on the last word that finishes by `end`, never mid-word, no sentence rules."""
     i = next((k for k, w in enumerate(words) if w["e"] > start + 0.05), None)
     if i is None: return start, end
     start = max(words[i]["s"] - 0.2, words[i - 1]["e"] if i else 0)
     j = max((k for k, w in enumerate(words) if w["s"] < end), default=i)
+    if exact:  # viewer: "End 2 s earlier" did nothing because rule 3 snapped 13 s back (19 Nov)
+        j = max((k for k in range(i, len(words)) if words[k]["e"] <= end + 0.05), default=i)
+        nxt = words[j + 1]["s"] - 0.05 if j + 1 < len(words) else words[j]["e"] + 0.25
+        return start, max(words[j]["e"] + 0.1, min(words[j]["e"] + 0.25, nxt))
     full = lambda k: bool(re.search(r"[.?!]$", words[k]["w"]))
     stop = lambda k: full(k) or k + 1 == len(words) or words[k + 1]["s"] - words[k]["e"] >= 0.25  # sentence end or a breath (no gap cap: a long pause is a pause)
     ahead = [k for k in range(j, len(words)) if words[k]["e"] <= end + 4]
@@ -526,7 +531,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
     allw = [w for s in json.load(open(tjson, encoding="utf-8"))["segments"] for w in s["words"] if w["w"]]
     _a, _b = secs(start), secs(end); talk = sum(min(w["e"], _b) - max(w["s"], _a) for w in allw if w["e"] > _a and w["s"] < _b) / max(_b - _a, 1)
     wordless = talk < 0.12  # a game-action / chat-spike moment with almost no talk (live clips): word snapping and dead-air cuts would leave ~1 s, so keep the whole window
-    start, end = (_a, _b) if wordless else snap(allw, _a, _b); out = Path(out); work = out.parent / ".work" / out.stem  # temp files kept out of sight
+    start, end = (_a, _b) if wordless else snap(allw, _a, _b, bool(opt("exact_end", opts, {}, False))); out = Path(out); work = out.parent / ".work" / out.stem  # temp files kept out of sight
     work.mkdir(parents=True, exist_ok=True)
     seg, v916, sub = work / "seg.mp4", work / "seg_916.mp4", work / "captions.ass"
     seek = start
@@ -716,7 +721,8 @@ if __name__ == "__main__":
     assert later_starts([dict(w="yo", s=1.0, e=1.2), dict(w="look", s=1.3, e=1.5), dict(w="bro", s=2.0, e=2.2)], 0.5, 20, keep=1) == [1.8]  # no full stops: a 0.5 s pause still counts
     assert snap(W, 0.5, 1.7) == (0.8, 2.65), snap(W, 0.5, 1.7)  # starts at the first word, ends after "crazy." not mid-sentence
     U = [dict(w="x", s=i * .3 + (.5 if i > 45 else 0), e=i * .3 + .25 + (.5 if i > 45 else 0)) for i in range(70)]  # unpunctuated, one 0.5 s pause after word 45
-    assert abs(snap(U, 0, 17.0)[1] - 14.0) < .01, snap(U, 0, 17.0)  # mid-sentence pick, no stop within 4 s: back off to the pause (was 17.05 mid-run)
+    assert abs(snap(U, 0, 17.0)[1] - 14.0) < .01, snap(U, 0, 17.0)
+    assert snap(W, 0.5, 1.7, True)[1] < snap(W, 0.5, 1.7)[1] and snap(W, 0.5, 1.7, True)[1] <= 1.7 + 0.25, snap(W, 0.5, 1.7, True)  # exact_end: ends on the last word before 1.7, not the next sentence  # mid-sentence pick, no stop within 4 s: back off to the pause (was 17.05 mid-run)
     assert clean("shit,") == "s***" and clean("crazy.") == "crazy" and clean("Dickens") == "Dickens"
     _w = [dict(w="yo", s=2.0, e=2.3, end=False), dict(w="look", s=2.4, e=2.7, end=True)]
     assert keep_spans(_w, np.full(200, 60.0), 10.0)[0][0] == 1.85, keep_spans(_w, np.full(200, 60.0), 10.0)  # 2 s of game sound before the first word: dropped

@@ -12,7 +12,7 @@ sys.path.insert(0, str(HERE)); import formats  # "format": callback, compilation
 
 PER_SOURCE = 2  # h19: 3 of 6 Shorts came from one Normies video (avg 5.4); a mix scores higher
 MAX_SPAN, MAX_TOTAL = 60, 64  # bench2 (18 Nov): viral Twitch clips run 6-61 s, median 25, 4/10 are 48-61 s; the old 32/36 cut setups and blocked every 35 s live clip
-OPT_KEYS = ("position", "watermark", "watermark_pos", "watermark_opacity", "watermark_size", "progress", "endcard", "aspects", "emoji", "lang", "flash", "lift", "fillers", "blackfix", "denoise", "squeeze", "flip", "theme", "cap_size", "hook_text", "hook_box", "progress_color", "watermark_color", "colors")
+OPT_KEYS = ("exact_end", "position", "watermark", "watermark_pos", "watermark_opacity", "watermark_size", "progress", "endcard", "aspects", "emoji", "lang", "flash", "lift", "fillers", "blackfix", "denoise", "squeeze", "flip", "theme", "cap_size", "hook_text", "hook_box", "progress_color", "watermark_color", "colors")
 def opts_json(p, skip=()):
     """Pick fields clip.py reads as its 10th argument (brand.json and CLIPPER_* env fill the rest)."""
     return json.dumps({k: p[k] for k in OPT_KEYS if k in p and k not in skip})
@@ -98,7 +98,7 @@ def main(picks_file, out_dir):
             r = formats.render(p, mp4) if formats.fmt_of(p) != "moment" else subprocess.run([sys.executable, str(HERE / "clip.py"), p["url"], p["transcript"], str(p["start"]), str(p["end"]), p["hook"], str(mp4), ",".join(p.get("keywords", [])), p.get("style", ""), p.get("layout", ""), opts_json(p)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             print(f"[{i}/{len(picks)}] " + "\n  ".join((r.stdout + r.stderr).strip().splitlines()[-6:]), flush=True)  # each Short's log in one block, not interleaved
-            if formats.fmt_of(p) == "moment" and r.returncode == 0 and mp4.exists() and (w := widen(p, mp4)):  # under 12 s after the silence cut: one more try with more story
+            if formats.fmt_of(p) == "moment" and not p.get("exact_end") and r.returncode == 0 and mp4.exists() and (w := widen(p, mp4)):  # a trim the user asked for is never widened back  # under 12 s after the silence cut: one more try with more story
                 print(f"[{i}/{len(picks)}] only {w[2]:.1f} s after cutting silences: widening {p['start']}-{p['end']} to {w[0]:.1f}-{w[1]:.1f}", flush=True)
                 r2 = subprocess.run([sys.executable, str(HERE / "clip.py"), p["url"], p["transcript"], f"{w[0]:.2f}", f"{w[1]:.2f}", p["hook"], str(mp4), ",".join(p.get("keywords", [])), p.get("style", ""), p.get("layout", ""), opts_json(p)], capture_output=True, text=True, encoding="utf-8", errors="replace")
                 print(f"[{i}/{len(picks)}] widened: " + ((r2.stdout + r2.stderr).strip().splitlines() or ["no output"])[-1], flush=True)

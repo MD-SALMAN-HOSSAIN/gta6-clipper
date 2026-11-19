@@ -430,7 +430,7 @@ def abs_transcript(root, pk):  # picks keep "clips/src/x.json" relative to the f
     q = dict(pk, transcript=fix(pk.get("transcript"))) if pk.get("transcript") else dict(pk)
     if q.get("parts"): q["parts"] = [dict(x, transcript=fix(x["transcript"])) if x.get("transcript") else x for x in q["parts"]]
     return q
-KNOBS = ("start/end (source seconds; the renderer snaps to sentences, max 32 s), hook, title, hashtags, credit, keywords (green words), style (%s), layout (stack|bubble|full), "
+KNOBS = ("start/end (source seconds; the renderer snaps to sentences, max 32 s; for a trim the user asks for, like \"end 2 s earlier\" or \"cut the last line\", set exact_end: true so the end stays where you put it, on the last whole word), hook, title, hashtags, credit, keywords (green words), style (%s), layout (stack|bubble|full), "
          "format (moment|callback|compilation|escalation|thenvsnow|reveal|chat|waitforit; multi-part ones need \"parts\": [{start,end,label?}]), meme (%s) + meme_at, music (hype|chill|tense|funny), "
          "position (auto|top|middle|bottom), watermark + watermark_pos (tl|tr|bl|br|bounce) + watermark_opacity + watermark_size, progress, endcard, aspects, lang (es|fr|pt|de|ar|hi), flash, lift, fillers, blackfix, denoise, squeeze")
 def edit_job(d):
