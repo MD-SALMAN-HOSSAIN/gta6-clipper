@@ -2,6 +2,12 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.12
+### Changed
+- Sharper video: the stretched 9:16 crops are scaled with a sharper method and lightly sharpened, the in-between steps no longer lose detail, and the final file keeps more of it.
+### Testing
+- Same moment rendered before and after: face/cam panel twice as sharp, game panel 15-25% sharper; render about 14% slower.
+
 ## 1.0.11
 ### Added
 - What's new: Settings > Updates now lists every version with what changed and how it was tested, and shows what an update brings before you install it. After each update, a short "What's new" window appears once.

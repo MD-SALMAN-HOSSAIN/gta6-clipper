@@ -550,7 +550,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
         else: raise SystemExit("audio keeps coming back short; try this Short again later")
         src, seek = str(part), 0
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{seek:.3f}", "-to", f"{seek + end - start:.3f}", "-i", src,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", str(seg)], check=True, timeout=300 + 20 * (end - start))
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-c:a", "aac", "-b:a", "192k", str(seg)], check=True, timeout=300 + 20 * (end - start))
     reframe.crop_bars(seg)  # black bars baked into the stream frame (trailer/cutscene letterbox) would show as strips or a small picture
     global CAP_Y, HOOK_Y, STACKED, KEY
     flip = truthy(opt("flip", opts, brand, "")); reframe.FLIP = flip
@@ -699,7 +699,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
         fg += f"[s{k}]" + (f"crop=1080:{H}:0:{y0}," if H != 1920 else "") + f"ass=cap{k}.ass:fontsdir=.[c{k}];" + deco(k, H, y0, f"c{k}", f"o{k}")
     fg += f"[ac]{dn}{ln}[an];" + whoosh(punch) + f"afade=t=out:st={max(new_dur - 0.08, 0):.2f}:d=0.08" + (f",asplit={nb}" + "".join(f"[a{k}]" for k in range(nb)) if nb > 1 else "[a0]") + ";"  # hard cut on the punchline (refs end on the peak, no fade); 80 ms only to avoid a click
     outs = []
-    for k, (suf, H, y0) in enumerate(branches): outs += ["-map", f"[o{k}]", "-map", f"[a{k}]", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", str((out.parent / (out.stem + suf + out.suffix)).resolve())]
+    for k, (suf, H, y0) in enumerate(branches): outs += ["-map", f"[o{k}]", "-map", f"[a{k}]", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", str((out.parent / (out.stem + suf + out.suffix)).resolve())]
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", v916.name, *extra, "-filter_complex", fg.rstrip(";"), *outs], check=True, cwd=work, timeout=600 + 30 * new_dur)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(out.resolve()), "-frames:v", "1", "-q:v", "2", str(out.with_name(out.stem + "_cover.jpg").resolve())])  # fresh cover (frame at 1 s) for a Short re-cut with clip.py alone
     cut = dur - new_dur - lead

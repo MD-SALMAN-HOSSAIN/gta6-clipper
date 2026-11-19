@@ -96,9 +96,9 @@ def rect(box, W, H, k):
 
 def panels(f, rs):
     """One crop = the whole 9:16 frame; two crops = split screen, first on top."""
-    if len(rs) == 1: x0, y0, x1, y1 = rs[0]; return cv2.resize(f[y0:y1, x0:x1], (OW, OH), interpolation=cv2.INTER_CUBIC)
+    if len(rs) == 1: x0, y0, x1, y1 = rs[0]; return cv2.resize(f[y0:y1, x0:x1], (OW, OH), interpolation=cv2.INTER_LANCZOS4)
     out = np.zeros((OH, OW, 3), np.uint8)
-    for n, (x0, y0, x1, y1) in enumerate(rs): out[n * OH // 2:(n + 1) * OH // 2] = cv2.resize(f[y0:y1, x0:x1], (OW, OH // 2), interpolation=cv2.INTER_CUBIC)
+    for n, (x0, y0, x1, y1) in enumerate(rs): out[n * OH // 2:(n + 1) * OH // 2] = cv2.resize(f[y0:y1, x0:x1], (OW, OH // 2), interpolation=cv2.INTER_LANCZOS4)
     out[OH // 2 - 3:OH // 2 + 3] = 0; return out  # thin seam
 
 def speakers(path, a, b, W, H, fps, N):
@@ -187,10 +187,12 @@ def plan(path):
     xs = np.clip(xs, cw / 2, W - cw / 2)
     return dict(W=W, H=H, fps=fps, cw=cw, N=N, shots=shotlog), xs, mode
 
+SHARP = (0.6, 1.4)  # unsharp amount/sigma on the 9:16 frame: crops are stretched 1.8-2.6x from 1080p (viewer: 'better quality?' 19 Nov; tested light/medium/strong, medium = crisp, no halos)
+def hq(f): return cv2.addWeighted(f, 1 + SHARP[0], cv2.GaussianBlur(f, (0, 0), SHARP[1]), -SHARP[0], 0)
 def encoder():
     """NVIDIA GPU encoder if it really works on this PC, else CPU x264 (works everywhere)."""
     probe = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "nullsrc=s=256x256", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True)
-    return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"] if probe.returncode == 0 else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19"]
+    return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "14"] if probe.returncode == 0 else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12"]  # near-lossless middle step: the final encode is the only lossy one
 
 TOP_CUT = 0.08  # stream overlays (viewer counters, alerts) sit in the top strip: crop it off, which also zooms the face a little
 BAND = (.15, .10, .15, .20)  # left/top/right/bottom share of the source frame where stream widgets live; a blob centred there is overlay, deeper in is game
@@ -244,7 +246,7 @@ def fit(boxes, win, W, H, xlim=None, ylim=None):
 def crop916(f, x, win=None):
     """9:16 crop centred on x, minus the top strip. win=(y0, height, xoff) from trim916() trims overlays that sit in the crop (counters, footers)."""
     H, W = f.shape[:2]; y0, ch, xo = win or (int(H * TOP_CUT), H - int(H * TOP_CUT), 0); cw = int(ch * 9 / 16)
-    x0 = int(np.clip(round(x - cw / 2 + xo), 0, W - cw)); return cv2.resize(f[y0:y0 + ch, x0:x0 + cw], (OW, OH), interpolation=cv2.INTER_CUBIC)
+    x0 = int(np.clip(round(x - cw / 2 + xo), 0, W - cw)); return cv2.resize(f[y0:y0 + ch, x0:x0 + cw], (OW, OH), interpolation=cv2.INTER_LANCZOS4)
 
 def screen_rows(f, x, fy, minh=0.45):
     """(top, bottom) rows of a screen-in-screen (an in-game TV, a video on a wall) around the face at column x / row fy, or None.
@@ -461,7 +463,7 @@ def fill(f, W, H, cw, rc=None):
         out = np.zeros((OH, OW, 3), np.uint8)
         for (x0, y0, x1, y1), (a, b, c, d) in rc:
             if FLIP and len(rc) == 2: b, d = OH - d, OH - b  # flip: two call tiles swap places
-            out[b:d, a:c] = cv2.resize(f[y0:y1, x0:x1], (c - a, d - b), interpolation=cv2.INTER_CUBIC)
+            out[b:d, a:c] = cv2.resize(f[y0:y1, x0:x1], (c - a, d - b), interpolation=cv2.INTER_LANCZOS4)
         return out
     if rc is None:
         rows = np.flatnonzero(f[:, ::8].max(axis=(1, 2)) > 30)  # letterbox bars (cinematic uploads) are pure black: trim them, equal top and bottom
@@ -493,7 +495,7 @@ def render(src, dst, info, xs, mode, smart=True):
             out = crop916(f, xs[i], win)
         elif mode[i] == "fill": out = fill(f, W, H, cw, fr.get(i))
         else: out = panels(f, mode[i])
-        ff.stdin.write(cv2.cvtColor(out, cv2.COLOR_BGR2YUV_I420).tobytes()); i += 1  # half the bytes of BGR through the pipe
+        ff.stdin.write(cv2.cvtColor(hq(out), cv2.COLOR_BGR2YUV_I420).tobytes()); i += 1  # half the bytes of BGR through the pipe
     cap.release(); ff.stdin.close(); ff.wait()
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp), "-i", str(src), "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(dst)], check=True)
     tmp.unlink()
@@ -720,23 +722,23 @@ def render_stack(src, dst, cam, layout="stack"):
                 if sr: wins[v] = (sr[0], sr[1] - sr[0], 0); tries[v] = 9; print(f"  full-face crop kept inside an on-screen video: rows {sr[0]}-{sr[1]}")
             frame = crop916(f, v, wins[v])
         elif layout == "bubble":
-            out[:] = cv2.resize(f[gy0:gy1, fx:fx + fw], (OW, OH), interpolation=cv2.INTER_CUBIC)
-            b = cv2.resize(f[sy:sy + s, sx:sx + s], (BUB, BUB), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+            out[:] = cv2.resize(f[gy0:gy1, fx:fx + fw], (OW, OH), interpolation=cv2.INTER_LANCZOS4)
+            b = cv2.resize(f[sy:sy + s, sx:sx + s], (BUB, BUB), interpolation=cv2.INTER_LANCZOS4).astype(np.float32)
             x0, y0 = (OW - BUB) // 2, BUB_Y
             cv2.circle(out, (x0 + BUB // 2, y0 + BUB // 2), BUB // 2 - 1, (255, 255, 255), -1, cv2.LINE_AA)  # white ring = the 6 px the mask leaves
             roi = out[y0:y0 + BUB, x0:x0 + BUB].astype(np.float32)
             out[y0:y0 + BUB, x0:x0 + BUB] = (b * mask + roi * (1 - mask)).astype(np.uint8)
             frame = out
         else:
-            top = cv2.resize(f[cam[1]:cam[3], cam[0]:cam[2]], (OW, TOP_H), interpolation=cv2.INTER_CUBIC)
+            top = cv2.resize(f[cam[1]:cam[3], cam[0]:cam[2]], (OW, TOP_H), interpolation=cv2.INTER_LANCZOS4)
             out[cy:cy + TOP_H] = cv2.addWeighted(top, 1.6, cv2.GaussianBlur(top, (0, 0), 3), -0.6, 0) if sharpen else top  # small cams scaled 3x+ look soft: unsharp mask
             if rg:  # game window full width over a blurred copy of itself (inset 2 % = its frame)
                 ix, iy = int(.02 * (rg[2] - rg[0])), int(.02 * (rg[3] - rg[1])); c = f[rg[1] + iy:rg[3] - iy, rg[0] + ix:rg[2] - ix]; fh = min(bh, int(OW * c.shape[0] / c.shape[1]))
                 bg = cv2.convertScaleAbs(cv2.resize(cv2.GaussianBlur(cv2.resize(c, (OW // 8, bh // 8)), (0, 0), 4), (OW, bh)), alpha=0.55); y = (bh - fh) // 2; bg[y:y + fh] = cv2.resize(c, (OW, fh), interpolation=cv2.INTER_AREA); out[gy:gy + bh] = bg
-            else: out[gy:gy + bh] = cv2.resize(f[gy0:gy1, gx:gx + bw], (OW, bh), interpolation=cv2.INTER_CUBIC)
+            else: out[gy:gy + bh] = cv2.resize(f[gy0:gy1, gx:gx + bw], (OW, bh), interpolation=cv2.INTER_LANCZOS4)
             out[sm - 3:sm + 3] = 0  # thin seam
             frame = out
-        ff.stdin.write(cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420).tobytes()); i += 1
+        ff.stdin.write(cv2.cvtColor(hq(frame), cv2.COLOR_BGR2YUV_I420).tobytes()); i += 1
     cap.release(); ff.stdin.close(); ff.wait()
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp), "-i", str(src), "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(dst)], check=True)
     tmp.unlink()
