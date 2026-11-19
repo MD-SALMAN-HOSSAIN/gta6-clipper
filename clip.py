@@ -103,6 +103,22 @@ def durations(p):
 
 def loudnorm_stats(stderr): return json.loads(re.findall(r"\{[^{}]*\}", stderr, re.S)[-1])
 
+def fix_loudness(path):
+    """Last safety pass: if the finished mp4 lands farther than 1.5 LU from -14 LUFS, re-normalise only its audio (two-pass linear loudnorm, video copied). Never raises."""
+    try:
+        path = Path(path); lu = lambda p: (lambda m: float(m[-1]) if m else None)(re.findall(r"I:\s+(-?[\d.]+) LUFS", subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(p), "-af", "ebur128", "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace").stderr))  # same measure as qc.py's lufs()
+        before = lu(path)
+        if before is None or abs(before + 14) <= 1.5: return before
+        r = subprocess.run(["ffmpeg", "-v", "info", "-i", str(path), "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        s = loudnorm_stats(r.stderr)
+        ln = f"loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={s['input_i']}:measured_TP={s['input_tp']}:measured_LRA={s['input_lra']}:measured_thresh={s['input_thresh']}:offset={s['target_offset']}:linear=true"
+        tmp = path.with_name(path.stem + ".loudfix" + path.suffix)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", str(tmp)], check=True)
+        after = lu(tmp); os.replace(tmp, path)
+        print(f"  loudness fix: {before:.1f} -> {'?' if after is None else format(after, '.1f')} LUFS")
+        return after
+    except Exception as e: print(f"  loudness fix skipped ({e}); keeping {Path(path).name} as is")
+
 def speech_db(words, wav_db):
     """Typical speech loudness: median of each word's peak."""
     return np.median([wav_db[int(w["s"] * 20):int(w["e"] * 20) + 1].max(initial=-99) for w in words]) if words else 0
@@ -689,6 +705,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
     print("ok", out, f"{new_dur:.1f}s ({start:.1f}-{end:.1f}, {cut:.1f}s dead air cut),", len(words), "caption words,",
           sum(1 for s in info["shots"] if s["mode"] == "fill"), "fill shots")
     shutil.rmtree(work, ignore_errors=True)  # ~100 MB of temp video per Short
+    fix_loudness(out)  # safety net: a render that still misses -14 LUFS gets its audio re-normalised in place
 
 if __name__ == "__main__":
     assert [len(g) for g in groups([dict(w="a", s=0, e=.2), dict(w="b", s=.3, e=.5), dict(w="c", s=2, e=2.2)])] == [2, 1], "pause must split lines"
@@ -787,5 +804,9 @@ if __name__ == "__main__":
     assert freeze_filters([(75, 86)], 30, [(0, 1.0), (2.0, 5.0)]) == "split[fz45a][fz45b];[fz45a][fz45b]freezeframes=first=45:last=56:replace=44,", freeze_filters([(75, 86)], 30, [(0, 1.0), (2.0, 5.0)])
     assert longest_gap([dict(s=1.0, e=1.4), dict(s=1.5, e=2.0)], 3.0) == 1.0 and longest_gap([dict(s=0.2, e=1.0), dict(s=1.1, e=1.5)], 6.5) == 5.0 and longest_gap([], 4.0) == 4.0
     assert [w["w"] for w in heard([dict(w="a", s=0, e=.4), dict(w="b", s=1.2, e=1.6), dict(w="c", s=2.1, e=2.5)], [(0, 1), (2, 3)])] == ["a", "c"]
+    if shutil.which("ffmpeg"):  # loudness safety pass: a far-too-quiet clip comes back at -14 LUFS
+        import tempfile; _t = Path(tempfile.gettempdir()) / f"clip_selftest_loud_{os.getpid()}.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x180:rate=30", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-af", "volume=0.05", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(_t)], check=True)
+        _l = fix_loudness(_t); assert _l is not None and abs(_l + 14) <= 1.5, _l; _t.unlink()
     if len(sys.argv) < 7: print("clip.py selftest ok; usage: clip.py SRC TRANSCRIPT.json START END HOOK OUT [keys style layout opts]"); sys.exit()
     main(*sys.argv[1:11])

@@ -2,6 +2,16 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.9
+### Fixed
+- Shorts that came out too quiet now get their sound brought to the normal level (-14 LUFS) at the end of the render, so they pass the quality check.
+- The new screens (Add your voice, Help, Disk space, AI tool test and costs, Video on my PC) now follow the app language: English, French, Spanish, Portuguese, German, Arabic, Italian and Turkish.
+- After a run, the AI opens the app for you so you can review your Shorts and add your voice.
+- "Video picked" shows the file name instead of the whole path on Windows.
+### Testing
+- A Short that measured -18.7 LUFS came out at -14.2 LUFS and passed the quality check.
+- All 8 languages checked in the browser (no English left, no errors, Arabic right to left).
+
 ## 1.0.8
 ### Added
 - More sources: links from TikTok, X, Instagram, Facebook, Rumble, Vimeo, Reddit and Dailymotion, besides YouTube, Twitch and Kick. **Make > Video on my PC** clips your own recordings. Short clips (from 8 s) work when you give the link.

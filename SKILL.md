@@ -57,4 +57,4 @@ Downloads only each moment, picks the layout itself, crops overlays, adds zoom, 
 batch.py runs `qc.py` (PASS/WARN/FAIL, details `clips/out/qc.json`). FAIL: re-cut once with clip.py a sentence later or earlier as the reason says, re-run qc; still fails = drop it and say so. WARN: look at that overview row. Each `overview.jpg` row: first frame = a face or the moment (not a menu or empty street); last frame = still the moment (not a logo, end card, credits); face in frame, captions off faces, hook readable, no black bars. Fix one alone: `PY SKILL\clip.py <url> <transcript> START END "HOOK" clips\out\<name>.mp4`, or drop it.
 
 ## 5. Hand over
-Never upload. Give each Short with its `.txt` and the list with QC status. Posting help, the app, live clipping, voice lines: reference.
+Never upload. Give each Short with its `.txt` and the list with QC status. Then open the app for the user: start `PY SKILLpp.py <the user's folder>` in the background (it opens the browser) and give its address, so they can review the Shorts, change the look and record their voice. Do the same right after a first setup. Posting help, the app, live clipping, voice lines: reference.
