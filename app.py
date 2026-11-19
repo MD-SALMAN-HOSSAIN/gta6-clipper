@@ -29,6 +29,8 @@ PROV = {
     "kimi": dict(label="Kimi Code CLI", bin="kimi", tools=True, text=["kimi"] + KIMI_P, run=["kimi"] + KIMI_P, note="Cheap builder; fine for picks and edits; verify the output."),
     "opencode": dict(label="OpenCode", bin="opencode", tools=True, text=["opencode", "run", "--agent", "plan"], run=["opencode", "run", "--auto"],  # prompt on stdin: its plan agent may not read files outside the folder
                      note="Works with its free models (no account) or your own model; free models pick weaker than Claude, verify the output."),
+    "antigravity": dict(label="Google Antigravity CLI", bin="agy", tools=True, text=["agy"] + KIMI_P, run=["agy"] + KIMI_P + ["--dangerously-skip-permissions"],  # agy -p takes no stdin: prompt file
+                        note="Google's agent CLI (Gemini or Claude models, Google sign-in); verify the output."),
     "ollama": dict(label="Ollama (local)", bin="ollama", tools=False, text=["ollama", "run", "{model}"], run=None,
                    note="Free and offline but text only: it can improve hooks/titles and apply edits as JSON; picks come from chat spikes + loudness, then batch.py renders."),
     "custom": dict(label="Custom command", bin=None, tools=True, text=None, run=None, note="Your own command; put {prompt_file} where the prompt file path goes (else the prompt is sent on stdin)."),
@@ -112,7 +114,14 @@ def pickmode_api(d=None):
         save_env(E)
     return dict(pick_cfg(), estimates=PICK_EST, info=PICK_INFO, live_info=LIVE_INFO)
 def prov_bin(i):
-    b = PROV[i]["bin"]; return (shutil.which(b) or (str(KIMI) if i == "kimi" and KIMI.exists() else None)) if b else None
+    b = PROV[i]["bin"]
+    if not b: return None
+    if shutil.which(b): return shutil.which(b)
+    if i == "kimi" and KIMI.exists(): return str(KIMI)
+    if i == "antigravity" and os.name == "nt":  # winget installs it here; PATH only updates in new shells
+        g = sorted(Path(os.environ.get("LOCALAPPDATA", "")).glob("Microsoft/WinGet/Packages/Google.AntigravityCLI_*/agy.exe"))
+        if g: return str(g[-1])
+    return None
 def custom_cmd(E=None):
     t = (E or env()).get("AI_CUSTOM", "").strip()
     if not t: raise ValueError("custom AI: no command saved (POST /api/ai with custom_cmd)")
@@ -129,7 +138,7 @@ def ai_cmd(i, run=False):
     if i == "custom": return custom_cmd()
     if i == "ollama": return ["ollama", "run", env().get("AI_OLLAMA_MODEL", "llama3.1")]
     c = PROV[i]["run"] if run else PROV[i]["text"]
-    return [prov_bin(i) or c[0]] + c[1:] if i == "kimi" else list(c)
+    return [prov_bin(i) or c[0]] + c[1:] if i in ("kimi", "antigravity") else list(c)
 def feed(cmd, prompt, dry=False):  # -> (cmd, stdin). {prompt_file} in the command = prompt goes to a file instead of stdin
     if not any("{prompt_file}" in c for c in cmd): return cmd, prompt
     pf = WS / "ai_prompts" / f"p_{int(time.time() * 1000)}.txt"
@@ -138,8 +147,10 @@ def feed(cmd, prompt, dry=False):  # -> (cmd, stdin). {prompt_file} in the comma
 def chain_cmd(folder, n, ai): return [sys.executable, str(HERE / "app.py"), "--chain", str(folder), str(n), ai]
 def chain_text(folder, n):
     return f'"{sys.executable}" "{HERE / "nopick.py"}" "{folder}" {n}  ;  "{sys.executable}" "{HERE / "batch.py"}" "{Path(folder) / "picks.json"}" "{folder}"'
+CHAIN_AI = ("none", "ollama", "antigravity")  # app-run chain; antigravity only picks: agy -p kills background steps after 30 min idle (agy102)
 def run_cmd(ai, n, folder, prompt, dry=False):  # -> (cmd, stdin, shown_prompt): tool AIs run the whole job; none/ollama = nopick + batch chain
     if ai in ("none", "ollama"): return chain_cmd(folder, n, ai), None, "No tool-running AI: " + chain_text(folder, n)
+    if ai == "antigravity" and not prompt_twitch(prompt): return chain_cmd(folder, n, ai), None, "The app downloads, transcribes and renders; Antigravity picks the moments. " + chain_text(folder, n)
     cmd, stdin = feed(ai_cmd(ai, True), prompt, dry); return cmd, stdin, prompt
 def providers():
     out = []
@@ -153,19 +164,33 @@ def text_ai(cmd, prompt, timeout=180):
     r = subprocess.run(exe(cmd), input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=str(HERE))
     if r.returncode: raise RuntimeError((r.stderr or r.stdout)[-300:])
     return r.stdout
+def prompt_twitch(prompt): return "the latest VOD of the Twitch streamer" in prompt  # chain cannot fetch a streamer's latest VOD: full agent run
+def agy_pick(folder, clips, n, pf):  # Antigravity picks only (minutes, under its 30 min cap); the app renders
+    py = sys.executable
+    global WS; WS = WS or Path(folder)  # --chain runs without a workspace: the prompt file goes in the run folder
+    if subprocess.run([py, str(HERE / "nopick.py"), str(clips), "--candidates", "30"]).returncode: return False
+    pr = (f"Use the gta6-clipper skill. Its folder is {HERE} (read SKILL.md there, step 2 pick rules). Read only {clips / 'candidates.txt'} and write {pf} with the {n} best picks "
+          "in the picks.json format of SKILL.md. Do NOT run batch.py, clip.py or any render or download: only write that one file, then stop. Never ask me a question.")
+    cmd, stdin = feed(ai_cmd("antigravity", True), pr)
+    try: subprocess.run(exe(cmd), input=stdin, text=True, encoding="utf-8", errors="replace", timeout=2700, cwd=str(folder))  # foreground pick: agy has no cap on it; 3 picks took 22 min
+    except (OSError, subprocess.TimeoutExpired) as e: print("antigravity pick failed:", e)
+    try: return isinstance(json.loads(pf.read_text(encoding="utf-8")), list)
+    except (OSError, ValueError): return False
 def chain_main(folder, n, ai):  # headless: nopick.py writes picks.json, (ollama polishes hooks/titles), batch.py renders
     folder = Path(folder); folder.mkdir(parents=True, exist_ok=True); py = sys.executable; npk = HERE / "nopick.py"
     if not npk.exists(): sys.exit("nopick.py is missing in " + str(HERE))
     clips = folder if list((folder / "src").glob("*.txt")) else folder / "clips"   # a run that already holds src/*.txt is used as is
     if not list((clips / "src").glob("*.txt")):   # no transcript yet: find + download + transcribe with the SKILL's watch.py (step 1), cwd = run folder so it writes clips/src
         sf = folder / "source.txt"; w = sf.read_text(encoding="utf-8") if sf.exists() else "the newest GTA 6 videos"
-        m = re.search(r"this link: (\S+)(?: with the time window (\S+))?", w) or re.search(r"channel[^:]*: (\S+)", w)
+        m = re.search(r"this link: (.+?)(?: with the time window (\S+))?\s*$", w) or re.search(r"channel[^:]*: (\S+)", w)
         if m: a = [m[1]] + ([m[2]] if m.lastindex and m.lastindex > 1 and m[2] else [])
         elif "newest GTA 6" in w: a = ["GTA ?(6|VI)", "5"]
         else: sys.exit("no-AI runs take 'newest' or a video link as the source (Twitch streamers/channels need an AI tool)")
         if subprocess.run([py, str(HERE / "watch.py")] + a, cwd=str(folder)).returncode or not list((clips / "src").glob("*.txt")): sys.exit("watch.py found or transcribed nothing")
     pf = folder / "picks.json"
-    if subprocess.run([py, str(npk), str(clips), str(n), "--out", str(pf)]).returncode or not pf.exists(): sys.exit("nopick.py made no picks.json")
+    if ai == "antigravity" and agy_pick(folder, clips, n, pf): print("antigravity wrote", pf)
+    elif ai == "antigravity": print("antigravity made no picks.json: No-AI picks instead"); pf.unlink(missing_ok=True)
+    if not (ai == "antigravity" and pf.exists()) and (subprocess.run([py, str(npk), str(clips), str(n), "--out", str(pf)]).returncode or not pf.exists()): sys.exit("nopick.py made no picks.json")
     if ai == "ollama":
         try:
             picks = json.loads(pf.read_text(encoding="utf-8")); pf.with_suffix(".json.bak").write_text(pf.read_text(encoding="utf-8"), encoding="utf-8")
@@ -175,6 +200,71 @@ def chain_main(folder, n, ai):  # headless: nopick.py writes picks.json, (ollama
         except Exception as e: print("ollama polish skipped:", e)
     sys.exit(subprocess.run([py, str(HERE / "batch.py"), str(pf), str(folder)], cwd=str(folder)).returncode)
 
+
+# ---------- help for viewers: plain-words fixes, your voice, show in folder, free space ----------
+HINTS = [  # (regex on an error/log, the fix in plain words) - from real viewer reports (video 08 comments, 19 Nov)
+    (r"credit balance is too low|Credit balance", "Claude Code is signed in with an API account that has no credit, not with your Claude plan. Open a terminal, run claude, type /login and pick your Claude Pro or Max account."),
+    (r"quota reached|RESOURCE_EXHAUSTED|rate.?limit|usage limit", "This AI tool's quota ran out for now. Pick another tool in Settings > AI tool, or No AI (free, always works)."),
+    (r"setup refresh had errors|sandbox.*(denied|blocked)|network access.*(disabled|denied)", "Codex's sandbox blocks the internet, so nothing can download. The app runs Codex with full access; in your own terminal start it with: codex --sandbox danger-full-access"),
+    (r"Please run /login|not logged in|Invalid API key|authentication_error|\b401\b|sign in", "The AI tool is not signed in. Open it once in a terminal and sign in, then try again."),
+    (r"is not recognized as an internal|command not found|No such file or directory: '(claude|codex|agy|opencode|gemini|kimi)'|WinError 2", "The AI tool is not installed, or this window can't see it yet. Install it, then close and reopen the app."),
+    (r"Sign in to confirm|not a bot|HTTP Error 403", "YouTube asked for a login. Set CLIPPER_BROWSER=chrome (or edge/firefox, the browser you're signed in with) and run again."),
+    (r"ffmpeg not found|ffprobe.*not found", "ffmpeg is missing. Windows: winget install Gyan.FFmpeg, then reopen the app. Mac: brew install ffmpeg."),
+    (r"waiting up to 30m|print timeout after 30m", "Antigravity stopped a step after 30 minutes. Update the app: it now runs the long steps itself."),
+]
+def hint(text):
+    for rx, fix in HINTS:
+        if re.search(rx, text or "", re.I): return fix
+    return ""
+VOICE_EXT = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "video/webm": "webm"}
+def voice_job(d):  # your recorded line on a Short -> a NEW version under app_renders (the original is kept)
+    base = run_file(d["run"], d["file"]); root = run_dir(d["run"]); src = base
+    if d.get("version"):
+        src = (root / d["version"]).resolve()
+        if (root / "app_renders") not in src.parents or src.suffix != ".mp4" or not src.exists(): raise ValueError("bad version")
+    m = re.fullmatch(r"data:([\w/+.-]+)(?:;[^,]*)?;base64,(.+)", d.get("audio") or "", re.S)
+    if not m: raise ValueError("record or choose your voice line first")
+    raw = __import__("base64").b64decode(m[2])
+    if not 1000 < len(raw) <= 20_000_000: raise ValueError("the voice file must be under 20 MB")
+    ext = VOICE_EXT.get(m[1].split(";")[0].lower())
+    if not ext: raise ValueError("use a voice file in webm, ogg, wav, mp3 or m4a")
+    at = float(d.get("at") or 0)
+    if not 0 <= at <= 600: raise ValueError("bad start time")
+    vdir = root / "app_renders" / f"{base.stem}__voice_{time.strftime('%H%M%S')}"; vdir.mkdir(parents=True, exist_ok=True)
+    line = vdir / f"line.{ext}"; line.write_bytes(raw)
+    cmd = [sys.executable, str(HERE / "voice.py"), str(src), str(line), f"{at:.2f}", str(vdir / base.name)]
+    return start_job("voice", cmd, None, False, root, None, d["file"]), vdir
+def voice_done(jid, key, vdir, at):  # history entry once the voice version exists
+    while JOBS[jid]["status"] == "running": time.sleep(1)
+    ok = JOBS[jid]["status"] == "done" and any(vdir.glob("[0-9][0-9]_*.mp4"))
+    with SL:
+        S = load_state(); S["shorts"].setdefault(key, {}).setdefault("edits", []).append(dict(time=time.strftime("%Y-%m-%dT%H:%M:%S"), instruction=f"Your voice at {at:.1f} s", job=jid,
+            result="new version with your voice" if ok else "failed: " + (JOBS[jid]["log"] or ["no output"])[-1][-200:], status="done" if ok else "failed", version=f"app_renders/{vdir.name}")); save_state(S)
+def reveal(path):  # open the file manager on a Short (local app, the viewer's own PC)
+    if os.name == "nt": subprocess.Popen(["explorer", "/select,", str(path)])
+    elif sys.platform == "darwin": subprocess.Popen(["open", "-R", str(path)])
+    else: subprocess.Popen(["xdg-open", str(path.parent)])
+SPACE_EXT = {".mp4", ".m4a", ".webm", ".mkv", ".ts", ".part", ".wav", ".opus", ".mp3", ".flv"}
+def space_files():  # downloaded source videos/audio only (clips/src, .work); transcripts and finished Shorts stay
+    out = []
+    for d in list(WS.rglob("src")) + list(WS.rglob(".work")):
+        if not d.is_dir() or "app_renders" in d.parts: continue
+        out += [f for f in d.rglob("*") if f.is_file() and (f.suffix.lower() in SPACE_EXT or ".part" in f.name)]
+    return out
+def pick_file():  # native "open file" window on the viewer's PC (the browser cannot hand a path to the app)
+    code = ("import tkinter as t, tkinter.filedialog as f; r = t.Tk(); r.withdraw(); r.attributes('-topmost', True); "
+            "print(f.askopenfilename(title='Pick a video', filetypes=[('Videos', '*.mp4 *.mkv *.mov *.webm *.avi *.flv *.ts *.m4v'), ('All files', '*.*')]))")
+    try: r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", timeout=600)
+    except (OSError, subprocess.TimeoutExpired): return {"error": "could not open the file window: paste the file path instead"}
+    path = r.stdout.strip()
+    return {"path": path} if path else {"cancelled": True}
+def space(delete=False):
+    fs = space_files(); n = sum(f.stat().st_size for f in fs)
+    if delete:
+        for f in fs:
+            try: f.unlink()
+            except OSError: pass
+    return {"bytes": n, "files": len(fs), "deleted": bool(delete)}
 
 # ---------- library of runs ----------
 def run_dir(rid):
@@ -333,11 +423,13 @@ def conn_test(name):
     try:
         import chat; ok, detail = chat.check(name); return dict(ok=bool(ok), detail=str(detail))  # read-only 10 s chat probe, no keys
     except Exception as e: return dict(ok=False, detail=f"check failed: {e}")
-def abs_transcript(root, pk):  # picks keep "clips/src/x.json" relative to the folder the run was made in; the edit job runs elsewhere, so make it absolute
-    if not pk.get("transcript") or Path(pk["transcript"]).is_absolute(): return pk
-    for b in (root.parent.parent, root.parent, root, WS):
-        if (b / pk["transcript"]).exists(): return dict(pk, transcript=str(b / pk["transcript"]))
-    return pk
+def abs_transcript(root, pk):  # picks keep "clips/src/x.json" relative to the folder the run was made in; edit + look jobs run elsewhere, so make it absolute
+    def fix(v):
+        if not v or Path(v).is_absolute(): return v
+        return next((str(b / v) for b in (root, root.parent, root.parent.parent, WS) if (b / v).exists()), v)
+    q = dict(pk, transcript=fix(pk.get("transcript"))) if pk.get("transcript") else dict(pk)
+    if q.get("parts"): q["parts"] = [dict(x, transcript=fix(x["transcript"])) if x.get("transcript") else x for x in q["parts"]]
+    return q
 KNOBS = ("start/end (source seconds; the renderer snaps to sentences, max 32 s), hook, title, hashtags, credit, keywords (green words), style (%s), layout (stack|bubble|full), "
          "format (moment|callback|compilation|escalation|thenvsnow|reveal|chat|waitforit; multi-part ones need \"parts\": [{start,end,label?}]), meme (%s) + meme_at, music (hype|chill|tense|funny), "
          "position (auto|top|middle|bottom), watermark + watermark_pos (tl|tr|bl|br|bounce) + watermark_opacity + watermark_size, progress, endcard, aspects, lang (es|fr|pt|de|ar|hi), flash, lift, fillers, blackfix, denoise, squeeze")
@@ -410,13 +502,20 @@ def start_job(kind, cmd, envx=None, dry=False, cwd=None, stdin=None, label=""):
     JOBS[jid] = dict(id=jid, kind=kind, label=label, status="running", log=[], t=time.time(), dry=dry)
     threading.Thread(target=run_job, args=(jid, cmd, envx or {}, dry, cwd, stdin), daemon=True).start(); return jid
 
-OK_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "twitch.tv", "www.twitch.tv", "kick.com", "www.kick.com"}
+OK_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "twitch.tv", "www.twitch.tv", "m.twitch.tv", "kick.com", "www.kick.com",
+            "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "x.com", "twitter.com", "mobile.twitter.com", "instagram.com", "www.instagram.com",
+            "facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch", "rumble.com", "vimeo.com", "player.vimeo.com", "reddit.com", "www.reddit.com",
+            "streamable.com", "dailymotion.com", "www.dailymotion.com", "dai.ly"}  # yt-dlp reads all of these (viewer ask, 19 Nov: "only twitch?")
+VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".flv", ".ts", ".m4v"}
 def clean_source(value):  # 'newest', an allow-listed http(s) URL, or a bare @handle/channel id; no spaces or shell characters
     v = (value or "").strip()
     if v.lower() == "newest" or re.fullmatch(r"@?[\w.\-]{1,60}", v): return v
     u = urlparse(v)
     if re.fullmatch(r"\S{1,300}", v) and not re.search(r"[\"'`$&|;<>^%]", v) and u.scheme in ("http", "https") and (u.hostname or "").lower() in OK_HOSTS: return v
-    raise ValueError("source must be 'newest' or a youtube/youtu.be/twitch/kick link")
+    f = Path(v.strip('"'))  # a video file on this PC (own recording, a download)
+    if len(v) < 400 and not re.search(r"[`$|;<>\n]", v) and f.suffix.lower() in VIDEO_EXT and f.is_file(): return str(f.resolve())
+    if u.scheme in ("http", "https"): raise ValueError("this site is not supported yet. Links that work: YouTube, Twitch, Kick, TikTok, X, Instagram, Facebook, Rumble, Vimeo, Reddit, Dailymotion")
+    raise ValueError("paste a video link, a video file path, or type: newest")
 def source_what(kind, value, win=""):
     value = clean_source(value) if (value or "").strip() else ""
     if not re.fullmatch(r"[\d:.\-, ]{0,40}", win or ""): raise ValueError("bad time window")
@@ -442,7 +541,7 @@ def new_run(d):
     if ai in ("none", "ollama") and what.startswith("the latest VOD"): raise ValueError("No-AI runs take 'newest', a channel or a video link; a Twitch streamer needs an AI tool")
     folder = WS / "runs" / time.strftime("run_%Y%m%d_%H%M%S")
     cmd, stdin, shown = run_cmd(ai, n, folder, build_prompt(n, what), d.get("dry", False))
-    if ai in ("none", "ollama") and not d.get("dry"): folder.mkdir(parents=True, exist_ok=True); (folder / "source.txt").write_text(what + "\n", encoding="utf-8")
+    if ai in CHAIN_AI and not d.get("dry"): folder.mkdir(parents=True, exist_ok=True); (folder / "source.txt").write_text(what + "\n", encoding="utf-8")
     return cmd, shown, folder, stdin
 LOOK = dict(flip="flip", theme="theme", position="position", cap_size="cap_size", watermark="watermark", wm_pos="watermark_pos", wm_opacity="watermark_opacity", wm_size="watermark_size", aspects="aspects")  # app.html name -> clip.py pick key
 def look_fields(d): return {v: d[k] for k, v in LOOK.items() if d.get(k) not in (None, "", [])}  # empty = leave the pick/brand value alone
@@ -451,7 +550,7 @@ def rerender(d):
     if not pk: raise ValueError("no pick found for this Short (picks*.json): cannot re-render")
     st, lay = d["style"], d["layout"]; fmt = d.get("format") or ""; names = [f["name"] for f in formats()]; dflt = "callback" if pk.get("parts") else "moment"
     if fmt not in names: fmt = dflt
-    p = dict(pk, style=st, layout=lay, again=True)  # again: a remake is never dropped as a duplicate
+    p = dict(abs_transcript(root, pk), style=st, layout=lay, again=True)  # again: a remake is never dropped as a duplicate; absolute transcript (viewer bug 19 Nov: look versions failed)
     if fmt != dflt: p["format"] = fmt
     p.update(look_fields(d))
     if d.get("meme"): p["meme"] = d["meme"]  # mood of the meme sound: none|embarrassing|fail|shock|win|awkward|cringe|funny|suspense
@@ -762,7 +861,7 @@ class H(BaseHTTPRequestHandler):
                 run_file(q["run"], q["file"]); return self.send(200, dict(edits=load_state()["shorts"].get(f"{q['run']}|{q['file']}", {}).get("edits", [])))
             if u.path == "/api/jobs": return self.send(200, [{k: v for k, v in j.items() if k != "log"} for j in JOBS.values()])
             if u.path == "/api/job":
-                j = JOBS.get(q.get("id", "")); return self.send(200 if j else 404, j or {})
+                j = JOBS.get(q.get("id", "")); return self.send(200 if j else 404, dict(j, hint=hint(chr(10).join(j["log"][-40:])) if j["status"] == "failed" else "") if j else {})
             if u.path == "/api/schedule": return self.send(200, schedule_rows())
             if u.path == "/api/schedule.csv":
                 buf = io.StringIO(); w = csv.writer(buf); w.writerow(["run", "file", "title", "hashtags", "credit", "local_time", "utc_time"])
@@ -879,6 +978,15 @@ class H(BaseHTTPRequestHandler):
                     E["AI_CUSTOM"] = cc
                 if d.get("ollama_model"): E["AI_OLLAMA_MODEL"] = re.sub(r"[^\w.:\-/]", "", str(d["ollama_model"]))[:80]
                 save_env(E); return self.send(200, dict(providers=providers(), current=cur_ai()))
+            if p == "/api/voice":
+                jid, vdir = voice_job(d); threading.Thread(target=voice_done, args=(jid, key, vdir, float(d.get("at") or 0)), daemon=True).start()
+                return self.send(200, {"job": jid, "version_dir": f"app_renders/{vdir.name}"})
+            if p == "/api/reveal":
+                f = run_file(d["run"], d["file"]) if not d.get("version") else (run_dir(d["run"]) / d["version"]).resolve()
+                if run_dir(d["run"]) not in f.parents or not f.exists(): return self.send(404, {"error": "file not found"})
+                reveal(f); return self.send(200, {"ok": True})
+            if p == "/api/space": return self.send(200, space(bool(d.get("delete"))))
+            if p == "/api/pickfile": return self.send(200, pick_file())
             if p == "/api/ai/test":
                 i = d.get("id")
                 if i not in PROV or i == "none": return self.send(400, {"error": "pick a real AI (No AI has nothing to test)"})
@@ -886,7 +994,7 @@ class H(BaseHTTPRequestHandler):
                 if d.get("dry"): return self.send(200, {"dry": True, "cmd": cmd, "installed": installed(i)})
                 t0 = time.time()
                 try: o = text_ai(ai_cmd(i), "Reply with the single word OK.", 60)
-                except Exception as e: return self.send(200, {"ok": False, "error": str(e)[-300:], "cmd": cmd, "seconds": round(time.time() - t0, 1)})
+                except Exception as e: return self.send(200, {"ok": False, "error": str(e)[-300:], "hint": hint(str(e)), "cmd": cmd, "seconds": round(time.time() - t0, 1)})
                 return self.send(200, {"ok": "OK" in o.upper(), "output": o.strip()[-200:], "cmd": cmd, "seconds": round(time.time() - t0, 1)})
             if p == "/api/brand":
                 f = WS / "brand.json"

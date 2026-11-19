@@ -11,6 +11,7 @@ PY -m pip install -r SKILL\requirements.txt
 nvidia-smi                            # works? then also: PY -m pip install -r SKILL\requirements-gpu.txt
 ```
 Tested on Windows with Python 3.11 and 3.14. The GPU pack is about 2 GB; install it only if `nvidia-smi` works (then 1 hour of video transcribes in about 4 minutes on the `small` model; the CPU uses the faster `base` model, slower). Macs use the CPU.
+When setup is done, start the app in the background for the user (`PY SKILLpp.py <the user's folder>`, see App) and end with three lines: the app's address (it opened in the browser), "Make Shorts" there or type "make 10 GTA 6 Shorts" here, and that typing "open the clipper app" opens it again later.
 
 
 ## Learn (channel with 8+ Shorts)

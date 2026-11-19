@@ -3,7 +3,7 @@
 # picks.json = [{"url": "...", "transcript": "src/<id>.json", "start": 120.5, "end": 148, "hook": "SPEED FOUND KFC IN GTA 6", "name": "speed_kfc",
 #                "title": "...", "hashtags": "#gta6 ...", "credit": "Kai Cenat", "style": "hormozi", "layout": "bubble"}, ...]
 #   "format": moment (default) | callback | compilation | escalation | thenvsnow | reveal | chat | waitforit: see formats.py for each one's fields   (title/hashtags/credit/style/layout optional)
-import json, os, subprocess, sys, threading, time
+import json, os, re, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")  # hooks can carry emoji; a cp1252 pipe would crash the print
@@ -77,6 +77,20 @@ def main(picks_file, out_dir):
     try: BRAND = json.load(open(bf, encoding="utf-8")) if bf else {}
     except ValueError: BRAND = {}
     done, t0, lock = [], time.time(), threading.Lock()
+    def widen(p, mp4, need=12.0):  # -> (start, end, length) when the render came out too short and the transcript has more story around it
+        try: L = json.loads(mp4.with_suffix(".render.json").read_text(encoding="utf-8"))["length"]
+        except Exception: return None
+        if L >= need: return None
+        tx = Path(p["transcript"]).with_suffix(".txt")
+        try: lines = [tuple(map(float, m.groups())) + (l,) for l in tx.read_text(encoding="utf-8").splitlines() if (m := re.match(r"\[([\d.]+)-([\d.]+)\]", l))]
+        except OSError: return None
+        if not lines: return None
+        s, e = float(p["start"]), float(p["end"]); grow = (need - L) * 1.8 + 4  # the silence cut keeps about half of the added time
+        END = re.compile(r"[.?!]['\")\]]*\s*(\[[^\]]*\]\s*)*$")
+        ends = [b for a, b, l in lines if e + 3 <= b <= e + grow + 8 and END.search(l.split("]", 1)[1].strip())]
+        ne = min(ends, default=min(e + grow, lines[-1][1]))
+        ns = min([a for a, b, l in lines if s - grow / 2 <= a <= s - 2], default=s) if ne - e < grow else s  # not enough after the payoff: start a bit earlier too
+        return (ns, ne, L) if ne - ns <= 60 and (ne > e + 1 or ns < s - 1) else None
     def one(i, p):
         try:
             mp4 = out / f"{n0 + i:02d}_{p['name']}.mp4"
@@ -84,6 +98,11 @@ def main(picks_file, out_dir):
             r = formats.render(p, mp4) if formats.fmt_of(p) != "moment" else subprocess.run([sys.executable, str(HERE / "clip.py"), p["url"], p["transcript"], str(p["start"]), str(p["end"]), p["hook"], str(mp4), ",".join(p.get("keywords", [])), p.get("style", ""), p.get("layout", ""), opts_json(p)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             print(f"[{i}/{len(picks)}] " + "\n  ".join((r.stdout + r.stderr).strip().splitlines()[-6:]), flush=True)  # each Short's log in one block, not interleaved
+            if formats.fmt_of(p) == "moment" and r.returncode == 0 and mp4.exists() and (w := widen(p, mp4)):  # under 12 s after the silence cut: one more try with more story
+                print(f"[{i}/{len(picks)}] only {w[2]:.1f} s after cutting silences: widening {p['start']}-{p['end']} to {w[0]:.1f}-{w[1]:.1f}", flush=True)
+                r2 = subprocess.run([sys.executable, str(HERE / "clip.py"), p["url"], p["transcript"], f"{w[0]:.2f}", f"{w[1]:.2f}", p["hook"], str(mp4), ",".join(p.get("keywords", [])), p.get("style", ""), p.get("layout", ""), opts_json(p)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                print(f"[{i}/{len(picks)}] widened: " + ((r2.stdout + r2.stderr).strip().splitlines() or ["no output"])[-1], flush=True)
+                if r2.returncode == 0: p = dict(p, start=round(w[0], 2), end=round(w[1], 2))
             if r.returncode or not mp4.exists(): print(f"[{i}/{len(picks)}] failed, skipped", flush=True); return  # one bad source must not stop the other nine
             with lock:  # shared files: one writer at a time
                 done.append(mp4)
@@ -128,6 +147,7 @@ def main(picks_file, out_dir):
         print(f"qc: {sum(r['status'] == 'PASS' for r in res)} PASS, {sum(r['status'] == 'WARN' for r in res)} WARN, {sum(r['status'] == 'FAIL' for r in res)} FAIL -> {out / 'qc.json'}")
     except Exception as e: print("qc failed (the Shorts are fine):", e)
     print(f"ok {len(done)}/{len(picks)} Shorts in {(time.time() - t0) / 60:.1f} min -> {out}")
+    if picks and not done: sys.exit(1)  # nothing rendered = a failed job, so the app shows the error instead of "done"
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["selftest"]:

@@ -2,6 +2,31 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## 1.0.8
+### Added
+- More sources: links from TikTok, X, Instagram, Facebook, Rumble, Vimeo, Reddit and Dailymotion, besides YouTube, Twitch and Kick. **Make > Video on my PC** clips your own recordings. Short clips (from 8 s) work when you give the link.
+- Add your voice in the app: open a Short, pause where you want to talk, record one sentence (or use a phone voice memo) and get a new version with the game sound lowered under you. The original stays.
+- Help page (side menu and Settings): answers to the questions asked most.
+- Settings > AI tool shows what each tool costs, and **Test this AI tool** checks it and says how to fix it if it doesn't answer.
+- Settings > Disk space: see how much the downloaded videos take and delete them. Shorts and transcripts stay.
+- **Show in folder** on every Short.
+- Google Antigravity CLI as an AI tool.
+### Fixed
+- "Make a version with this look" made no new version when the app runs from another folder (transcript path). A render that makes nothing now reports a failure.
+- Runs in Antigravity no longer stop after 30 minutes: the app downloads, transcribes and renders by itself and asks Antigravity only to pick the moments. When its free quota runs out, the app picks with No AI.
+- Shorts no longer come out too short (9 to 12 s) after the silences are cut: the app widens the moment and renders it once more. No AI also skips moments that are mostly silence.
+- When a site changes and downloads break (TikTok did), the skill updates its downloader to the newest build and tries again.
+- Failed steps now show **How to fix** in plain words: credit balance too low, quota ran out, Codex sandbox without internet, not signed in, YouTube login, ffmpeg missing.
+- Setup ends by opening the app.
+- Live hunt says it watches from the moment you start, and where to find the hours before.
+### Testing
+- Claude Code, fresh install of this version: install + setup + 1 Short in 20 min, QC PASS.
+- Codex 0.162 with full access: install + setup + 1 Short in 16.5 min, QC PASS.
+- Antigravity CLI 1.5.11: install + setup 234 s; from the app 3 of 3 Shorts in 29 min; No AI fallback 1 of 1 when its quota ran out.
+- TikTok link: downloader updated itself, 1 Short QC PASS. Video file from the PC (folder with spaces): 1 Short QC PASS.
+- A Short that came out at 10.1 s re-rendered at 15.0 s. No AI: 3 of 3 at full length (before: 2 of 2 too short).
+- Voice: recorded in the browser and from a file, new version made in about 10 s.
+
 ## 1.0.7
 ### Added
 - OpenCode as an AI tool (Settings > AI tool). The install and setup sentences also work inside OpenCode, on its free models.

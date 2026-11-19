@@ -6,6 +6,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import callbacks
 import batch
 MIN_W, MAX_W, TARGET = 15, 32, 24  # batch.MAX_SPAN is 32; story length matters more than the old 22 s target
+MIN_TALK = 14  # est. kept seconds (overshoots ~1.5 s vs the render) of speech in a window: clip.py cuts the silences, so a 23 s window with 10 s of talk became a 10 s Short (noai102)
 EXC = re.compile(r"\b(oh my (god|gosh)|no way|bro|what the|what\?|holy|yo+|let'?s go+|bruh|are you kidding|crazy|insane|scared|nervous)\b|!|\bwhat\b", re.I)
 LAUGH = re.compile(r"\b(ha(ha)+|lol|lmao|laugh\w*|dying|dead)\b", re.I)
 BAD_START = re.compile(r"^(and|but|so|he|she|it|they|that|this|then|or)\b", re.I)
@@ -63,7 +64,17 @@ def hook(win, name, title=""):
             fallback = phrase(f"{verb} {obj.split()[0]}")
         if fallback: return fallback
     return phrase("WATCH THIS") or phrase("LOOK")
-def windows(lines, cb):
+def kept(words, s, e, gap=0.35, pad=0.15):
+    """Seconds clip.py keeps of [s, e]: word runs split at pauses over `gap`, padded (rough copy of clip.keep_spans). No words = no check."""
+    w = [x for x in words if x["s"] >= s and x["e"] <= e]
+    if not words: return MIN_TALK
+    tot, a, b = 0.0, None, None
+    for x in w:
+        if a is not None and x["s"] - b <= gap: b = x["e"]; continue
+        if a is not None: tot += b - a + 2 * pad
+        a, b = x["s"], x["e"]
+    return tot + (b - a + 2 * pad if a is not None else 0)
+def windows(lines, cb, words=()):
     """One candidate per peak line: ends on the peak's sentence end, starts so the clip is ~TARGET s with the peak in the last 40%."""
     out = []
     for k, p in enumerate(lines):
@@ -77,8 +88,14 @@ def windows(lines, cb):
         if not ks: continue
         i = min(ks, key=lambda i: abs(e - lines[i]["s"] - TARGET))
         if p["s"] - lines[i]["s"] < 0.4 * (e - lines[i]["s"]): continue  # peak must sit in the last 60%: payoff near the end
-        out.append((sc, lines[i]["s"], e, [l for l in lines if l["s"] >= lines[i]["s"] and l["e"] <= e]))
+        win = [l for l in lines if l["s"] >= lines[i]["s"] and l["e"] <= e]
+        if kept(words, lines[i]["s"], e) < MIN_TALK: continue  # mostly silence: the cut Short would be too short
+        out.append((sc, lines[i]["s"], e, win))
     return out
+def words(txt):  # word timings from the transcript .json next to the .txt (empty when missing)
+    j = txt.with_suffix(".json")
+    try: return [w for g in json.load(open(j, encoding="utf-8"))["segments"] for w in g.get("words", [])]
+    except Exception: return []
 def pick(clips, n=10):
     clips = Path(clips); cands = []
     for t in sorted((clips / "src").glob("*.txt")):
@@ -86,7 +103,7 @@ def pick(clips, n=10):
         lines = callbacks.parse(t); name = streamer(meta)
         try: cb = {r["payoff"][0] for r in callbacks.find(lines, top=10)}
         except Exception: cb = set()
-        for sc, s, e, win in windows(lines, cb): cands.append(dict(score=sc, s=s, e=e, win=win, id=t.stem, meta=meta, who=name))
+        for sc, s, e, win in windows(lines, cb, words(t)): cands.append(dict(score=sc, s=s, e=e, win=win, id=t.stem, meta=meta, who=name))
     cands.sort(key=lambda c: -c["score"]); res = []
     for c in cands:
         if len(res) >= n: break
@@ -158,6 +175,14 @@ def selftest():
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a == ["--selftest"]: selftest(); sys.exit()
+    if a[:1] == ["--check"]:  # AI picks too: est. seconds left after clip.py cuts the silences (a 12 s Short slipped through, claude110)
+        bad = 0
+        for q in json.load(open(a[1], encoding="utf-8")):
+            r0 = Path(q.get("transcript") or ""); pj = Path(a[1]).resolve().parent
+            tr = next((b / r0 for b in (Path.cwd(), pj, pj.parent) if (b / r0).is_file()), r0); w = words(tr.with_suffix(".txt")) if r0.name else []  # relative to the run folder
+            k = kept(w, float(q["start"]), float(q["end"])) if w else None; short = k is not None and k < MIN_TALK; bad += short
+            print(f"{q.get('name', '?'):28} {float(q['end']) - float(q['start']):5.1f} s window -> ~{k if k is None else round(k, 1)} s of talk" + ("   TOO SHORT: widen it by a sentence or two, or pick another moment" if short else ""))
+        sys.exit(1 if bad else 0)
     if "--candidates" in a:
         i = a.index("--candidates"); pos = [x for x in a if not x.startswith("--")]; n = int(pos[1]) if len(pos) > 1 else 30
         txt = candidates(pos[0], n); (Path(pos[0]) / "candidates.txt").write_text(txt + chr(10), encoding="utf-8"); print(txt); sys.exit()

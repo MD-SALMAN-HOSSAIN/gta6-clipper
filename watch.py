@@ -13,10 +13,18 @@ CK = ["--cookies-from-browser", os.environ["CLIPPER_BROWSER"]] if os.environ.get
 import datetime
 T_META, T_AUDIO = int(os.environ.get("CLIPPER_META_TIMEOUT", 120)), int(os.environ.get("CLIPPER_DL_TIMEOUT", 1200))  # seconds: info lookups / audio download
 def run_t(cmd, timeout, what="command", **k):
-    """subprocess.run with a hard timeout: a stalled download prints one clear line and returns rc 124 (stderr = the reason) instead of freezing the run."""
-    try: return subprocess.run(cmd, timeout=timeout, **k)
+    """subprocess.run with a hard timeout: a stalled download prints one clear line and returns rc 124 (stderr = the reason) instead of freezing the run.
+    A site that changed (yt-dlp 'please report this issue' / 'Unable to extract') updates yt-dlp to its nightly once and retries: TikTok broke on the stable build 19 Nov."""
+    try: r = subprocess.run(cmd, timeout=timeout, **k)
     except subprocess.TimeoutExpired:
         print(f"  TIMEOUT: {what} stalled for {timeout} s, stopped", flush=True); return subprocess.CompletedProcess(cmd, 124, "", f"timeout after {timeout} s: {what}")
+    if r.returncode and "yt_dlp" in cmd and isinstance(r.stderr, str) and re.search(BROKEN, r.stderr) and not HEALED:
+        HEALED.append(1); print("  the site changed: updating yt-dlp to its newest build, then trying again", flush=True)
+        subprocess.run([PY, "-m", "pip", "install", "-q", "-U", "--pre", "yt-dlp[default]"], timeout=600)
+        return run_t(cmd, timeout, what, **k)
+    return r
+BROKEN = r"please report this issue|Unable to extract|Unexpected response from webpage|Unsupported URL|Requested format is not available"
+HEALED = []
 LANG = os.environ.get("CLIPPER_LANG", "en").lower()  # language of the videos you want; others are skipped from the title alone
 _W = {"fr": "je tu il elle les des une est pour avec sur dans quand vous nous ce cette au aux du réagit", "es": "el los las una para con por que cuando mi su pero esto reacciono",
       "pt": "uma não você para com por mais isso meu minha quando reagindo"}
@@ -120,7 +128,7 @@ for v in new:
     a = Path(url) if Path(url).is_file() else SRC / f"{v['id']}.m4a"  # a local file is transcribed as it is: nothing to download
     print("new:", v["date"] or f"{v['views']:,} {'viewers' if v.get('twitch') else 'views'}", v["channel"], "|", v["title"])
     # audio only: small and fast; the video is fetched later, only for the moments Claude picks (clip.py with the URL)
-    r = subprocess.CompletedProcess([], 0) if a.exists() else run_t([PY, "-m", "yt_dlp", *CK, "-q", "-f", "ba[ext=m4a]/audio_only/ba", "--match-filter", "duration>180" if link else "duration>180 & duration<=7200", *(["--download-sections", "*" + (v.get("win") or win)] if v.get("win") or win else []), "-o", str(a), url], T_AUDIO, "audio download " + v["id"], capture_output=True, text=True, encoding="utf-8", errors="replace")  # resume: audio already fetched
+    r = subprocess.CompletedProcess([], 0) if a.exists() else run_t([PY, "-m", "yt_dlp", *CK, "-q", "-f", "ba[ext=m4a]/audio_only/ba", "--match-filter", "duration>8" if link else "duration>180 & duration<=7200", *(["--download-sections", "*" + (v.get("win") or win)] if v.get("win") or win else []), "-o", str(a), url], T_AUDIO, "audio download " + v["id"], capture_output=True, text=True, encoding="utf-8", errors="replace")  # resume: audio already fetched
     if r.returncode and "confirm your age" in (r.stderr or ""):
         print("  skipped: age-restricted (needs a login)"); seen.add(v["id"]); SEEN.write_text(json.dumps(sorted(seen))); continue
     if r.returncode and re.search(r"live event will begin|Premieres in|is_upcoming", r.stderr or ""):
