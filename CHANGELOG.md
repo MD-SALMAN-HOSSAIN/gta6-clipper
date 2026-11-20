@@ -2,6 +2,13 @@
 
 All notable changes to gta6-clipper. Newest first.
 
+## Unreleased
+### Added
+- Pipeline tab in the app (sidebar / key `7`): run and monitor the command-line scripts (watch, live, moments, nopick, peek, batch, clip, qc and optional helpers) from a form, preview the exact command first, stream logs live, stop long runs, and see recent runs. Args are validated and paths are kept inside the workspace or skill folder.
+- Windows standalone build: `build_exe.spec` produces `dist\gta6-clipper\gta6-clipper.exe` with Python, the scripts, assets, ffmpeg/ffprobe/deno, the CUDA DLLs and the optional vision/translation packages included. The exe can still run pipeline scripts, asks for a workspace on first launch, and writes console output to `~/.clipper/clipper-console.log`.
+### Fixed
+- Pipeline "Find & transcribe" / "Chat spikes" / "Learn from a channel" no longer turn a title pattern (e.g. `GTA ?(6|VI)`) or a channel handle into a file path before running the script.
+
 ## 1.0.13
 ### Added
 - Light mode for low-memory laptops: under 12 GB of RAM the app makes 1 Short at a time, renders at 30 fps, uses the first hour of very long streams, deletes the downloaded audio after the transcript and checks free disk space before it starts.

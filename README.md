@@ -65,6 +65,19 @@ Open a terminal in the skill folder, then:
 
 </details>
 
+## Windows .exe build (no Python needed)
+
+On this repo, build a self-contained folder with:
+
+```
+python -m pip install -r requirements.txt -r requirements-gpu.txt
+python -m pip install --no-deps -r requirements-vision.txt -r requirements-translate.txt
+python -m pip install pyclipper shapely six
+py -m PyInstaller build_exe.spec --noconfirm
+```
+
+The result is `dist\gta6-clipper\gta6-clipper.exe` — double-click it and it opens the app in your browser, exactly like `python app.py <workspace>`. The first launch asks which folder to use as the workspace (or pass it as an argument: `gta6-clipper.exe D:\my-clips`). The bundle carries Python, the pipeline scripts, fonts/models/sounds, ffmpeg/ffprobe/deno, the CUDA runtime DLLs and the optional vision/translation packages (OCR, argostranslate); the AI CLI tools (Claude, Codex, etc.) still need to be installed separately if you want AI picks. Self-update and scheduled tasks are disabled in the exe (dry previews still work) — download a new build to update.
+
 ## How it works
 
 <img src="docs/img/how.png" alt="How it works: find, transcribe, pick, render, review, post" width="100%">
@@ -111,6 +124,10 @@ Start it any time with `python app.py <your workspace folder>` (it opens http://
 <td><img src="docs/img/settings.png" alt="Settings"><br><b>Settings.</b> Language, updates, and how much AI to use.</td>
 </tr>
 </table>
+
+### Pipeline tab (run the scripts yourself)
+
+Press **7** or click **Pipeline** in the sidebar to drive the command-line scripts from the browser. It lists 21 steps grouped as Gather / Pick / Render / Check (watch, live, moments, nopick, peek, batch, clip, qc, and the optional helpers). Pick one, fill the form, then either **Preview command** (prints the exact command without running it) or **Run script**. Output streams into the log panel, long runs can be stopped, and the last runs stay in the workspace as `pipeline_history.json`. Everything runs in the workspace folder, with paths validated and no shell involved.
 
 ## Live hunt: 8 GTA 6 streams at once
 

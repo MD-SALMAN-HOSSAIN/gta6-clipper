@@ -8,12 +8,18 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
-HERE = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)
+HERE = Path(getattr(sys, "_MEIPASS", "")).resolve() if FROZEN else Path(__file__).resolve().parent
+if FROZEN:  # bundled ffmpeg lives next to the scripts; scripts call it by name
+    os.environ["PATH"] = str(HERE / "bin") + os.pathsep + os.environ.get("PATH", "")
+    if sys.stdout is None:  # windowed build: keep script output in a log instead of losing it
+        (Path.home() / ".clipper").mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = (Path.home() / ".clipper" / "clipper-console.log").open("a", encoding="utf-8", buffering=1)
 ENV = Path.home() / ".clipper" / "blotato.env"   # outside HERE: the AI run gets --add-dir HERE and must not see the key
 OLD_ENV = HERE / ".env"
 TOKEN = secrets.token_urlsafe(24); PORT = 0   # per-start token the page echoes on every POST
 WS = None; STATE = None
-JOBS = {}; JLOCK = threading.Lock()
+JOBS = {}; JLOCK = threading.Lock(); PROCS = {}; PLOCK = threading.Lock()  # PROCS: live subprocesses, so the Pipeline panel can stop a run
 BLOTATO = "https://backend.blotato.com/v2"
 SKIP = {".venv", "node_modules", "app_renders", "models", "fonts", "rejected", "critic", "viral", "src", "__pycache__", ".git"}
 # ---------- AI providers: link any AI tool, or none ----------
@@ -480,6 +486,31 @@ def watch_edit(jid, key):  # when the job ends, store its DONE: line in the Shor
 
 
 # ---------- jobs ----------
+def pipe_hist():
+    try: return json.loads((WS / "pipeline_history.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError): return []
+def pipe_hist_write(rows):
+    try:
+        with SL: (WS / "pipeline_history.json").write_text(json.dumps(rows[:100], indent=1), encoding="utf-8")
+    except OSError: pass
+def pipe_hist_add(jid, script, args, cmd, dry):
+    rows = pipe_hist(); rows.insert(0, dict(id=jid, script=script, args=args, cmd=cmd, t=time.time(), status="dry" if dry else "running"))
+    pipe_hist_write(rows)
+def pipe_hist_finish(jid, status):
+    rows = pipe_hist()
+    for r in rows:
+        if r.get("id") == jid: r["status"] = status; break
+    pipe_hist_write(rows)
+def stop_job(jid):
+    with PLOCK: pr = PROCS.get(jid)
+    if not pr: return {"ok": False, "error": "that job is not running (or the app was restarted)"}
+    try:
+        if os.name == "nt":  # live.py/renderers spawn ffmpeg: kill the whole tree, not just the Python parent
+            r = subprocess.run(["taskkill", "/PID", str(pr.pid), "/T", "/F"], capture_output=True, text=True)
+            if r.returncode: pr.terminate()
+        else: pr.terminate()
+        return {"ok": True, "id": jid}
+    except OSError as e: return {"ok": False, "error": str(e)}
 def run_job(jid, cmd, envx, dry, cwd, stdin):
     J = JOBS[jid]
     def w(line):
@@ -492,11 +523,17 @@ def run_job(jid, cmd, envx, dry, cwd, stdin):
         Path(cwd).mkdir(parents=True, exist_ok=True)
         pr = subprocess.Popen(exe(cmd), stdin=subprocess.PIPE if stdin else None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                               env={**os.environ, **envx}, cwd=str(cwd))
-        if stdin: pr.stdin.write(stdin); pr.stdin.close()
-        for l in pr.stdout: w(l.rstrip())
-        J["status"] = "done" if pr.wait() == 0 else "failed"
+        with PLOCK: PROCS[jid] = pr
+        try:
+            if stdin: pr.stdin.write(stdin); pr.stdin.close()
+            for l in pr.stdout: w(l.rstrip())
+            rc = pr.wait()
+        finally:
+            with PLOCK: PROCS.pop(jid, None)
+        J["status"] = "done" if rc == 0 else "failed"
     except Exception as e:
         w(f"error: {e}"); J["status"] = "failed"
+    if J.get("kind") == "pipeline": pipe_hist_finish(jid, J["status"])
 def start_job(kind, cmd, envx=None, dry=False, cwd=None, stdin=None, label=""):
     jid = str(int(time.time() * 1000)); cwd = cwd or HERE
     JOBS[jid] = dict(id=jid, kind=kind, label=label, status="running", log=[], t=time.time(), dry=dry)
@@ -801,7 +838,212 @@ def published():
     bp, bd = {}, {}
     for r in rows: bp[r.get("platform", "?")] = bp.get(r.get("platform", "?"), 0) + 1; bd[r["at"][:10]] = bd.get(r["at"][:10], 0) + 1
     return dict(total=len(rows), by_platform=bp, by_day=dict(sorted(bd.items())), source=src)
+# ---------- pipeline control panel: runnable CLI scripts ----------
+F = lambda n, l, t="text", d="", h="", **kw: dict(name=n, label=l, type=t, default=d, help=h, **kw)
+def pipe_txt(v, name, limit=600):
+    v = str(v if v is not None else "").strip()
+    if len(v) > limit or any(ord(c) < 32 for c in v): raise ValueError(f"{name}: bad value")
+    return v
+def pipe_num(v, name, lo=None, hi=None, integer=False):
+    try: x = float(v)
+    except (TypeError, ValueError): raise ValueError(f"{name}: must be a number")
+    if (lo is not None and x < lo) or (hi is not None and x > hi): raise ValueError(f"{name}: out of range")
+    return int(x) if integer else x
+def pipe_path(v, name="path", must=False):
+    v = pipe_txt(v, name, 700).strip('"')
+    if not v: return ""
+    p = Path(v); p = (p if p.is_absolute() else WS / p).resolve()
+    if not (p == WS or WS in p.parents or p == HERE or HERE in p.parents): raise ValueError(f"{name}: path must be inside the workspace or skill folder")
+    if must and not p.exists(): raise ValueError(f"{name}: file not found ({p.name})")
+    return str(p)
+def pipe_out(v, fallback): return pipe_path(v, "out") or fallback
+def build_transcribe(a):
+    ap = pipe_path(a.get("audio"), "audio", True)
+    out = pipe_out(a.get("out"), str(Path(ap).with_suffix(".json")))
+    return [ap, out] + ([pipe_txt(a.get("model"), "model")] if pipe_txt(a.get("model"), "model") else [])
+def build_reframe(a):
+    sp = pipe_path(a.get("source"), "source", True)
+    out = pipe_out(a.get("out"), str(Path(sp).with_name(Path(sp).stem + "_9x16.mp4")))
+    dbg = pipe_path(a.get("debug"), "debug")
+    return [sp, out] + (["--debug", dbg] if dbg else [])
+def build_voice(a):
+    cp = pipe_path(a.get("clip"), "clip", True); lp = pipe_path(a.get("line"), "line", True)
+    out = pipe_out(a.get("out"), str(Path(cp).with_name(Path(cp).stem + "_voice.mp4")))
+    return [cp, lp, str(pipe_num(a.get("at", 0), "at", 0, 10000)), out]
+def pipe_source(v, name="source"):
+    v = pipe_txt(v, name, 700)
+    if re.fullmatch(r"(?:https?://\S+|twitch:\S*|kick:\S*|youtube:\S+|top:.+|buffer)", v, re.I): return v
+    # A title regex / channel name / handle is plain text: pass it through. Only resolve real file paths
+    # (with separators or a suffix, or an existing file) to an absolute path inside the workspace.
+    if re.search(r"[?()\[\]|*+^$\\,]", v) or v.startswith("@") or (not "/" in v and not "\\" in v and not Path(v).suffix and not (WS / v).is_file()): return v
+    return pipe_path(v, name)
+def pipe_opts(a, pairs):
+    out = []
+    for k, flag in pairs:
+        v = a.get(k)
+        if v in (None, "", False): continue
+        out.append(flag) if isinstance(v, bool) else out.extend([flag, str(v)])
+    return out
+def build_watch(a):
+    raw = str(a.get("source") or "").strip()
+    src = pipe_source(raw)
+    single = raw.lower().startswith(("http://", "https://", "twitch:", "top:")) or (WS / raw.strip('"')).is_file() or Path(raw.strip('"')).is_file()
+    return [src] + ([] if single else [str(pipe_num(a.get("count"), "count", 1, 100, True))]) + pipe_opts(a, [("window", "--window")])
+def build_qc(a):
+    files = [pipe_path(x, "target", True) for x in re.split(r"[,\n]", pipe_txt(a.get("targets"), "targets")) if x.strip()]
+    if not files: raise ValueError("targets: add at least one Short or folder")
+    return files + pipe_opts(a, [("picks", "--picks"), ("json", "--json")])
+PIPE_SCRIPTS = [
+ dict(key="watch", label="Find & transcribe", script="watch.py", group="Gather", heavy=True,
+      desc="Find new uploads matching a title pattern (or one link / twitch: category), download audio and transcribe into clips/src.",
+      fields=[F("source","Title pattern, link, file or twitch:category","text","GTA ?(6|VI)","GTA ?(6|VI) · a YouTube/Twitch link · twitch:Grand Theft Auto VI"),
+              F("count","Max new uploads","number",5,"Only used with a title pattern",min=1,max=100),
+              F("window","Time window","text","","2h, 90m, 1:10:00-1:40:00 (single link / file)")],
+      build=build_watch),
+ dict(key="live", label="Live recorder", script="live.py", group="Gather", heavy=True,
+      desc="Record a live stream in rolling segments and cut a Short on each chat spike. Runs until you press Stop.",
+      fields=[F("source","Channel, link or mode","text",'top:"Grand Theft Auto VI"','top:"category" · a Twitch/YouTube link · kick:slug · buffer'),
+              F("out","Output folder","text","clips/live","Where segments and picks go"),
+              F("ratio","Chat spike ratio","number",3,"Lower = more clips",min=1,max=50),
+              F("min","Minimum clip seconds","number",15,"",min=1,max=3600)],
+      build=lambda a: ([pipe_source(a.get("source","buffer"))] if str(a.get("source","")).strip().lower()=="buffer" else
+          [pipe_source(a.get("source")), "--out", pipe_path(a.get("out","clips/live")),
+           "--ratio", str(pipe_num(a.get("ratio",3),"ratio",1,50)), "--min", str(pipe_num(a.get("min",15),"min",1,3600,True))])),
+ dict(key="moments", label="Label video moments", script="moments.py", group="Gather",
+      desc="Label chase / crash / fight / stunt / reaction stretches of a video without AI (writes .moments.json).",
+      fields=[F("source","Video or audio file","file","","",must=True),
+              F("window","Time window","text","","1:10:00-1:40:00 (optional)"),
+              F("txt","Transcript .txt","file","","Optional tagged transcript"),
+              F("events","Events file","file","","Optional events JSON"),
+              F("cam","Cam box","text","","x0,y0,x1,y1"),
+              F("sheet","Contact sheet folder","text","","Optional folder for a sheet"),
+              F("out","Output JSON","text","","Defaults to <source>.moments.json")],
+      build=lambda a: ([pipe_path(a.get("source"),"source",True)] + ([pipe_txt(a.get("window"),"window")] if pipe_txt(a.get("window"),"window") else []) +
+          pipe_opts(a, [("txt","--txt"),("events","--events"),("cam","--cam"),("sheet","--sheet"),("out","--out")]))),
+ dict(key="chat", label="Chat spikes", script="chat.py", group="Gather",
+      desc="Read a stream's chat and report the loudest spike windows (no keys needed).",
+      fields=[F("source","Stream URL","text","","Twitch / Kick / YouTube VOD link"),F("window","Time window","text","","Optional start-end")],
+      build=lambda a: [pipe_source(a.get("source"))] + ([pipe_txt(a.get("window"),"window")] if pipe_txt(a.get("window"),"window") else [])),
+ dict(key="learn", label="Learn from a channel", script="learn.py", group="Gather",
+      desc="Study a channel's own Shorts (metadata only) and write clips/LEARN.md with what to copy.",
+      fields=[F("channel","Channel URL or @handle","text","",""),F("clips","Clips folder","text","clips",""),
+              F("out","Report file","text","","Defaults to <clips>/LEARN.md"),F("limit","Max Shorts","number",60,"",min=1,max=500)],
+      build=lambda a: [pipe_source(a.get("channel","channel"))] + pipe_opts(a, [("clips","--clips"),("out","--out"),("limit","--limit")])),
+ dict(key="vision", label="Game events", script="vision.py", group="Gather",
+      desc="Detect WASTED / BUSTED / mission banners, wanted stars and hard cuts; optionally tag the transcript.",
+      fields=[F("source","Video or link","text","",""),F("window","Time window","text","","START-END"),
+              F("fps","Scan FPS","number",1,"",min=0.1,max=30),F("grabs","Grabs folder","text","","Optional"),
+              F("stars","Wanted stars","flag",False,"Detect wanted level"),F("tag","Transcript to tag","file","","Optional .txt")],
+      build=lambda a: ([pipe_source(a.get("source"))] + ([pipe_txt(a.get("window"),"window")] if pipe_txt(a.get("window"),"window") else []) +
+          pipe_opts(a, [("fps","--fps"),("grabs","--grabs"),("stars","--stars"),("tag","--tag")]))),
+ dict(key="transcribe", label="Transcribe audio", script="transcribe.py", group="Pick", heavy=True,
+      desc="Local faster-whisper transcript with word timings plus [LOUD] tags (GPU if available, else CPU).",
+      fields=[F("audio","Audio file","file","","",must=True),F("out","Output JSON","text","","Defaults to <audio>.json"),
+              F("model","Model","choice","","Leave blank for auto (small on GPU, base on CPU)",options=["","tiny","base","small","medium","large-v3"])],
+      build=build_transcribe),
+ dict(key="nopick", label="Score & pick", script="nopick.py", group="Pick",
+      desc="Pick the best windows from chat/loudness tags and write picks.json for the renderer (or a shortlist).",
+      fields=[F("mode","Mode","choice","picks","",options=["picks","candidates","check"]),
+              F("folder","Clips folder","text","clips","Contains src/ transcripts"),
+              F("count","How many picks","number",10,"",min=1,max=100),
+              F("out","Output file","text","","For picks/candidates"),
+              F("checkfile","Picks file to check","file","","For Check mode")],
+      build=lambda a: (["--candidates",str(pipe_num(a.get("count",30),"count",1,200,True)),pipe_path(a.get("folder","clips"))]
+          if a.get("mode")=="candidates" else
+          ["--check",pipe_path(a.get("checkfile"),"checkfile",True)] if a.get("mode")=="check" else
+          [pipe_path(a.get("folder","clips")),str(pipe_num(a.get("count",10),"count",1,100,True))] +
+          (["--out",pipe_path(a.get("out"),"out")] if pipe_path(a.get("out"),"out") else []))),
+ dict(key="callbacks", label="Find callbacks", script="callbacks.py", group="Pick",
+      desc="Find setup/payoff pairs far apart in a transcript (the 'wait for it' clips).",
+      fields=[F("transcript","Transcript .txt","file","","",must=True),
+              F("min_gap","Min gap (min)","number",5,"",min=1,max=1000),
+              F("max_gap","Max gap (min)","number",120,"",min=1,max=10000),
+              F("top","How many","number",25,"",min=1,max=200)],
+      build=lambda a: [pipe_path(a.get("transcript"),"transcript",True),"--min-gap",str(pipe_num(a.get("min_gap",5),"min_gap",1,1000,True)),
+          "--max-gap",str(pipe_num(a.get("max_gap",120),"max_gap",1,10000,True)),"--top",str(pipe_num(a.get("top",25),"top",1,200,True))]),
+ dict(key="peek", label="Preview frames", script="peek.py", group="Pick",
+      desc="Download a tiny 240p slice of each pick and save start/middle/end strips to look at before rendering.",
+      fields=[F("picks","Picks JSON","file","","",must=True),F("out","Output folder","text","clips/peek","")],
+      build=lambda a: [pipe_path(a.get("picks"),"picks",True),pipe_path(a.get("out","clips/peek"))]),
+ dict(key="batch", label="Render picks", script="batch.py", group="Render", heavy=True,
+      desc="Render every pick in one go (captions, hook, meme, QC) into numbered Shorts plus a contact sheet.",
+      fields=[F("picks","Picks JSON","file","","",must=True),F("out","Output folder","text","clips/out","")],
+      build=lambda a: [pipe_path(a.get("picks"),"picks",True),pipe_path(a.get("out","clips/out"))]),
+ dict(key="clip", label="Render one Short", script="clip.py", group="Render", heavy=True,
+      desc="Cut one Short from a long video with captions, hook and loudness normalization.",
+      fields=[F("source","Source video or link","text","",""),F("transcript","Transcript JSON","file","","",must=True),
+              F("start","Start","text","","Seconds or m:ss"),F("end","End","text","","Seconds or m:ss"),
+              F("hook","On-screen hook","text","",""),F("out","Output mp4","text","clips/out/short.mp4",""),
+              F("keys","Keywords","text","","Comma separated"),F("style","Caption style","text","","From clip.py STYLES"),
+              F("layout","Layout","choice","","Options: stack, bubble, full",options=["","stack","bubble","full"]),
+              F("opts","Extra options JSON","text","","Pick options as JSON")],
+      build=lambda a: ([pipe_source(a.get("source")),pipe_path(a.get("transcript"),"transcript",True),
+          pipe_txt(a.get("start"),"start"),pipe_txt(a.get("end"),"end"),pipe_txt(a.get("hook"),"hook"),
+          pipe_path(a.get("out","clips/out/short.mp4")),pipe_txt(a.get("keys"),"keys"),pipe_txt(a.get("style"),"style"),
+          pipe_txt(a.get("layout"),"layout"),pipe_txt(a.get("opts"),"opts")]),),
+ dict(key="formats", label="Render by format", script="formats.py", group="Render", heavy=True,
+      desc="Render picks with their per-pick format (moment, callback, compilation, reveal, ...).",
+      fields=[F("picks","Picks JSON","file","","",must=True),F("out","Output folder","text","clips/out","")],
+      build=lambda a: [pipe_path(a.get("picks"),"picks",True),pipe_path(a.get("out","clips/out"))]),
+ dict(key="parts", label="Render callbacks", script="parts.py", group="Render", heavy=True,
+      desc="Render picks that have setup/payoff parts with a time-jump card between them.",
+      fields=[F("picks","Picks JSON","file","","",must=True),F("out","Output folder","text","clips/out","")],
+      build=lambda a: [pipe_path(a.get("picks"),"picks",True),pipe_path(a.get("out","clips/out"))]),
+ dict(key="reframe", label="Auto reframe", script="reframe.py", group="Render", heavy=True,
+      desc="Reframe a 16:9 video to 9:16, following the subject per shot.",
+      fields=[F("source","Source mp4","file","","",must=True),F("out","Output mp4","text","",""),F("debug","Debug plan JSON","text","","Optional")],
+      build=build_reframe),
+ dict(key="voice", label="Add your voice", script="voice.py", group="Render", heavy=True,
+      desc="Place a recorded line at a time in a finished Short and duck the game audio under it.",
+      fields=[F("clip","Finished Short","file","","",must=True),F("line","Voice line .wav","file","","",must=True),
+              F("at","At seconds","number",0,"",min=0,max=10000),F("out","Output mp4","text","","")],
+      build=build_voice),
+ dict(key="meme_add", label="Add meme sound", script="meme.py", group="Render",
+      desc="Save a meme sound from a link or local file into sounds/mine (use its name as a pick's meme).",
+      fields=[F("name","Sound name","text","",""),F("source","Link or file","text","",""),
+              F("window","Time window","text","","0:05-0:12")],
+      build=lambda a: ["add",pipe_txt(a.get("name"),"name"),pipe_source(a.get("source"))] +
+          ([pipe_txt(a.get("window"),"window")] if pipe_txt(a.get("window"),"window") else [])),
+ dict(key="meme_bed", label="Music bed", script="meme.py", group="Render", heavy=True,
+      desc="Lay a mood-matched music bed under a finished Short (or render the bed alone).",
+      fields=[F("clip","Finished Short","file","","",must=True),F("mood","Mood","choice","hype","",options=["hype","chill","tense","funny"]),
+              F("file","Music file","file","","Optional"),F("db","Volume dB","number",-14,"",min=-60,max=10),
+              F("out","Output mp4","text","",""),F("solo","Bed only","flag",False,"")],
+      build=lambda a: ["bed",pipe_path(a.get("clip"),"clip",True)] +
+          pipe_opts(a, [("mood","--mood"),("file","--file"),("db","--db"),("out","--out"),("solo","--solo")])),
+ dict(key="meme_gag", label="Meme gag", script="meme.py", group="Render", heavy=True,
+      desc="Add a sound + visual gag at the payoff of a finished Short.",
+      fields=[F("clip","Finished Short","file","","",must=True),F("mood","Mood","text","funny","embarrassing, fail, shock, win, awkward, cringe, funny, suspense"),
+              F("at","At seconds","text","","Optional"),F("out","Output mp4","text","",""),F("sheet","Sheet JPG","text","","Optional")],
+      build=lambda a: [pipe_path(a.get("clip"),"clip",True),"--mood",pipe_txt(a.get("mood"),"mood")] +
+          pipe_opts(a, [("at","--at"),("out","--out"),("sheet","--sheet")])),
+ dict(key="qc", label="Quality check", script="qc.py", group="Check",
+      desc="Check finished Shorts for black frames, silence, bad captions and cut length (PASS / WARN / FAIL).",
+      fields=[F("targets","Short mp4 files or folders","text","","Comma separated"),
+              F("picks","Picks JSON","file","","Optional word-timing check"),F("json","Write report","text","","Optional qc.json")],
+      build=build_qc),
+ dict(key="ytstats", label="YouTube stats", script="ytstats.py", group="Check",
+      desc="Print YouTube stats for a Short (needs a YT_API_KEY in Settings / the env file).",
+      fields=[F("video","Video URL or 11-char id","text","","")],
+      build=lambda a: [pipe_txt(a.get("video"),"video")]),
+]
+def pipeline_scripts():
+    return [{k: s.get(k, False if k == "heavy" else "") for k in ("key","label","script","group","desc","heavy","fields")} | {"workdir": "workspace"} for s in PIPE_SCRIPTS]
+def pipeline_run(d):
+    key = str(d.get("script") or d.get("key") or ""); s = next((x for x in PIPE_SCRIPTS if x["key"] == key), None)
+    if not s: raise ValueError("unknown script: " + key)
+    a = d.get("args") or {}
+    if not isinstance(a, dict): raise ValueError("args must be an object")
+    cmd = [sys.executable, str(HERE / s["script"])] + [str(x) for x in s["build"](a)]
+    envx = {k: v for k, v in env().items() if k.startswith(("CLIPPER_", "AI", "LIVE_", "YT_", "TRANSCRIBE_"))}
+    dry = bool(d.get("dry")); jid = start_job("pipeline", cmd, envx=envx, dry=dry, cwd=str(WS), label=s["label"])
+    with JLOCK: JOBS[jid]["script"] = s["key"]
+    pipe_hist_add(jid, s["key"], {k: str(v)[:120] for k, v in a.items()}, cmd, dry)
+    return {"job": jid, "cmd": cmd, "dry": dry}
 def api56(method, path, q, d):  # -> (code, json) or None when the route is not ours
+    if FROZEN and path == "/api/update/apply": return 200, {"error": "Self-update is not available in the .exe build. Download a newer build instead."}
+    if FROZEN and method == "POST" and path in ("/api/autopilot/plan", "/api/autopilot/off") and d.get("confirm") is True:
+        return 200, {"error": "Scheduled tasks need a Python install and are disabled in the .exe build. The dry preview still works."}
     if path == "/api/pickmode": return 200, pickmode_api(d if method == "POST" else None)
     if path == "/api/streamers":
         if method == "GET": lang = q.get("lang") or get_lang(); return 200, dict(lang=lang, langs=LANGS, streamers=streamers(lang))
@@ -827,6 +1069,9 @@ def api56(method, path, q, d):  # -> (code, json) or None when the route is not 
     if path == "/api/update/apply": r = update.apply(WS, dry=bool(d.get("dry"))); UPD["r"] = None; return 200, r
     if path == "/api/proposals" and method == "POST": return 200, proposal(d)
     if path == "/api/published" and method == "GET": return 200, published()
+    if path == "/api/pipeline" and method == "GET": return 200, dict(workspace=str(WS), scripts=pipeline_scripts(), history=pipe_hist())
+    if path == "/api/pipeline/run" and method == "POST": return 200, pipeline_run(d)
+    if path == "/api/pipeline/stop" and method == "POST": return 200, stop_job(d.get("job"))
 
 
 class H(BaseHTTPRequestHandler):
@@ -1063,6 +1308,13 @@ def main():
     global WS, STATE
     if sys.argv[1:2] == ["--chain"]: return chain_main(sys.argv[2], int(sys.argv[3]), sys.argv[4])
     a = [x for x in sys.argv[1:] if not x.startswith("--") and not x.isdigit()]
+    if not a and FROZEN:  # double-clicked: ask where to keep the Shorts
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk(); root.withdraw(); picked = filedialog.askdirectory(title="Choose a folder for your Shorts"); root.destroy()
+        except Exception: picked = ""
+        a = [picked or str(Path.home() / "gta6-clipper")]
     if not a: sys.exit(__doc__)
     WS = Path(a[0]).resolve(); STATE = WS / "app_state.json"
     if "--autopilot" in sys.argv: return autopilot_main("--dry" in sys.argv)  # headless entry used by the OS task
@@ -1072,7 +1324,7 @@ def main():
         try: srv = ThreadingHTTPServer(("127.0.0.1", p), H); PORT = p; break
         except OSError: continue
     else: sys.exit("no free port")
-    print(f"Clipper app on http://localhost:{p}  (workspace {WS})", flush=True)
+    if sys.stdout: print(f"Clipper app on http://localhost:{p}  (workspace {WS})", flush=True)
     if "--no-open" not in sys.argv: webbrowser.open(f"http://localhost:{p}")
     def upd_loop():
         while True:
@@ -1081,4 +1333,16 @@ def main():
             time.sleep(5 * 3600)
     threading.Thread(target=upd_loop, daemon=True).start()
     srv.serve_forever()
-if __name__ == "__main__": main()
+def frozen_runner():  # in the .exe, sys.executable is this exe: let pipeline jobs pass a script name to it
+    if not (FROZEN and len(sys.argv) > 1 and sys.argv[1].lower().endswith(".py")): return False
+    name = Path(sys.argv[1]).name
+    if name == "app.py": return False
+    script = HERE / name
+    if not script.is_file():
+        print("gta6-clipper: script not found in bundle:", name, file=sys.stderr); sys.exit(2)
+    sys.argv = [str(script)] + sys.argv[2:]
+    import runpy
+    runpy.run_path(str(script), run_name="__main__")
+    return True
+if __name__ == "__main__":
+    if not frozen_runner(): main()
